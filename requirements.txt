@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+python-docx
+python-multipart   # required by FastAPI to parse multipart/form-data (file uploads)
+pydantic
