@@ -15,6 +15,14 @@ async def evaluate_candidates(
     jd_file: UploadFile = File(..., description="The Job Description as a .docx file"),
     candidates_json: str = Form(..., description="JSON array of candidates matching the Candidate schema")
 ):
+    """
+    Endpoint to process a Job Description (JD) and a list of candidates.
+    
+    This endpoint validates the JD file format, extracts its text, and parses
+    the provided JSON string into a list of Candidate models. It returns
+    a PreprocessedInput object containing the combined data ready for
+    downstream LLM relevance and behavioral trajectory analysis.
+    """
     settings = get_settings()
 
     # --- Validate the JD file ---
