@@ -62,14 +62,11 @@ compute:
 ai_tools_used:
   - "Claude"        # e.g. for architecture discussion, code review
   - "GitHub Copilot"  # e.g. for autocomplete
-  # Other options: "ChatGPT", "Cursor", "Gemini", "Codeium", "Other", "None"
 
 ai_usage_summary: |
   Briefly describe how AI tools were used. Examples:
-  - "Used Claude for code review and architectural discussion. Used Copilot for autocomplete.
-     No candidate data was fed to any LLM."
+  - "Used Claude for code review and architectural discussion. Used Copilot for autocomplete."
   - "Used ChatGPT to debug Python issues and Cursor for refactoring."
-  - "No AI tools used."
 
 # ============================================================================
 # Approach summary (optional but recommended)
