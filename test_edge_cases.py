@@ -130,7 +130,7 @@ def test_edge_case_1_high_skill_match():
     print(f"  Vector Similarity: {eval_result.vector_similarity.cosine_similarity:.3f}")
     print(f"  Rule-Based Score: {eval_result.rule_based_score}/100")
     print(f"  Combined Score: {eval_result.combined_score:.3f}")
-    print("\n✅ PASS: High skill match scored correctly")
+    print("\n[PASS] High skill match scored correctly")
 
 
 def test_edge_case_2_consultant_background():
@@ -163,7 +163,7 @@ def test_edge_case_2_consultant_background():
     print(f"  Rule-Based Score: {eval_result.rule_based_score}/100")
     
     assert eval_result.rule_based_score < 50, "Consulting-only background should score low"
-    print("\n✅ PASS: Consulting-only background correctly penalized")
+    print("\n[PASS] Consulting-only background correctly penalized")
 
 
 def test_edge_case_3_junior_candidate():
@@ -194,7 +194,7 @@ def test_edge_case_3_junior_candidate():
     print(f"  Rule-Based Score: {eval_result.rule_based_score}/100")
     
     assert eval_result.rule_based_score < 40, "Junior candidate should score low"
-    print("\n✅ PASS: Junior candidate correctly scored")
+    print("\n[PASS] Junior candidate correctly scored")
 
 
 def test_edge_case_4_title_variation():
@@ -224,10 +224,10 @@ def test_edge_case_4_title_variation():
             current_title, history, jd.raw_text
         )
         has_match = score > 0
-        status = "✅" if has_match == should_match else "❌"
-        print(f"  {status} '{current_title}' → {score} points: {explanation}")
+        status = "[MATCH]" if has_match == should_match else "[NO-MATCH]"
+        print(f"  {status} '{current_title}' > {score} points: {explanation}")
     
-    print("\n✅ PASS: All title variations scored correctly")
+    print("\n[PASS] All title variations scored correctly")
 
 
 def test_edge_case_5_fuzzy_skill_matching():
@@ -251,11 +251,11 @@ def test_edge_case_5_fuzzy_skill_matching():
     print("\nFuzzy matching test cases:\n")
     for candidate_skill, jd_skills, should_match in test_cases:
         is_match, score, matched = matcher.find_skill_match(candidate_skill, jd_skills)
-        status = "✅" if is_match == should_match else "❌"
+        status = "[MATCH]" if is_match == should_match else "[NO-MATCH]"
         print(f"  {status} '{candidate_skill}' vs {jd_skills}")
-        print(f"      → Match: {is_match}, Score: {score:.2f}, Matched: '{matched}'")
+        print(f"      -> Match: {is_match}, Score: {score:.2f}, Matched: '{matched}'")
     
-    print("\n✅ PASS: All fuzzy matching cases handled correctly")
+    print("\n[PASS] All fuzzy matching cases handled correctly")
 
 
 def test_edge_case_6_behavioral_signals():
@@ -291,7 +291,7 @@ def test_edge_case_6_behavioral_signals():
     print(f"  GitHub activity: {base_candidate.redrob_signals.github_activity_score}")
     print(f"  Notice period: {base_candidate.redrob_signals.notice_period_days} days")
     
-    print("\n✅ PASS: Behavioral signals considered in scoring")
+    print("\n[PASS] Behavioral signals considered in scoring")
 
 
 if __name__ == "__main__":
@@ -303,5 +303,5 @@ if __name__ == "__main__":
     test_edge_case_6_behavioral_signals()
     
     print("\n" + "="*80)
-    print("ALL EDGE CASE TESTS PASSED ✅")
+    print("ALL EDGE CASE TESTS PASSED [PASS]")
     print("="*80 + "\n")

@@ -11,6 +11,7 @@ Workflow:
 """
 
 import json
+import traceback
 from app.models.candidate import Candidate
 from app.models.jd import JobDescription
 from app.services.relevance_evaluator import RelevanceEvaluator
@@ -26,7 +27,7 @@ def test_fastembed_workflow():
     print("="*80)
     
     # Load sample JD and candidates
-    print("\n1️⃣  Loading Job Description...")
+    print("\n[1] Loading Job Description...")
     
     # Create sample JD for testing
     jd_text = """
@@ -54,43 +55,43 @@ def test_fastembed_workflow():
     """
     
     jd = JobDescription(raw_text=jd_text, paragraph_count=15)
-    print(f"✅ JD loaded ({len(jd_text)} chars)")
+    print(f"[PASS] JD loaded ({len(jd_text)} chars)")
     
     # Load sample candidates
-    print("\n2️⃣  Loading Sample Candidates...")
+    print("\n[2] Loading Sample Candidates...")
     
     with open('inputs/datasets/sample_candidates.json', 'r') as f:
         sample_data = json.load(f)
     
     candidates = [Candidate(**c) for c in sample_data[:5]]
-    print(f"✅ Loaded {len(candidates)} candidates from sample data")
+    print(f"[PASS] Loaded {len(candidates)} candidates from sample data")
     
     # Initialize evaluator with FastEmbed
-    print("\n3️⃣  Initializing FastEmbed Embedding Service...")
+    print("\n[3] Initializing FastEmbed Embedding Service...")
     
     evaluator = RelevanceEvaluator(use_fastembed=True)
     embedding_service = get_embedding_service()
-    print(f"✅ FastEmbed initialized (model: BAAI/bge-small-en-v1.5, dim: 384)")
+    print(f"[PASS] FastEmbed initialized")
     
     # Extract JD keywords
-    print("\n4️⃣  Extracting JD Keywords...")
+    print("\n[4] Extracting JD Keywords...")
     
     jd_keywords = evaluator.extract_jd_required_skills(jd)
-    print(f"✅ Extracted {len(jd_keywords)} keywords from JD:")
+    print(f"[PASS] Extracted {len(jd_keywords)} keywords from JD:")
     for i, keyword in enumerate(jd_keywords[:10], 1):
         print(f"   {i:2d}. {keyword}")
     if len(jd_keywords) > 10:
         print(f"   ... and {len(jd_keywords) - 10} more")
     
     # Generate JD keyword embeddings
-    print("\n5️⃣  Generating JD Keyword Embeddings...")
+    print("\n[5] Generating JD Keyword Embeddings...")
     
     jd_embedding = embedding_service.embed_jd_keywords(jd_keywords)
-    print(f"✅ JD keywords embedded (shape: {jd_embedding.shape})")
+    print(f"[PASS] JD keywords embedded (shape: {jd_embedding.shape})")
     print(f"   Embedding sample: {jd_embedding[:5]}")
     
     # Evaluate each candidate
-    print("\n6️⃣  Evaluating Candidates with FastEmbed + Rule-Based Scoring...\n")
+    print("\n[6] Evaluating Candidates with FastEmbed + Rule-Based Scoring...\n")
     
     results = []
     
@@ -109,16 +110,16 @@ def test_fastembed_workflow():
         
         # Compute embedding-based cosine similarity
         embedding_similarity = embedding_service.cosine_similarity(jd_embedding, candidate_embedding)
-        print(f"  ✨ Embedding Similarity (FastEmbed): {embedding_similarity:.3f}")
+        print(f"  [SIM] Embedding Similarity (FastEmbed): {embedding_similarity:.3f}")
         
         # Compute vector similarity using full profile
         vector_sim_result = evaluator.compute_vector_similarity(jd, candidate)
-        print(f"  ✨ Profile Embedding Similarity: {vector_sim_result.cosine_similarity:.3f}")
+        print(f"  [SIM] Profile Embedding Similarity: {vector_sim_result.cosine_similarity:.3f}")
         
         # Get evaluation result (includes rule-based score)
         eval_result = evaluator.evaluate_candidate(jd, candidate)
-        print(f"  📊 Rule-Based Score: {eval_result.rule_based_score}/100")
-        print(f"  🎯 Combined Score: {eval_result.combined_score:.3f}")
+        print(f"  [SCORE] Rule-Based Score: {eval_result.rule_based_score}/100")
+        print(f"  [SCORE] Combined Score: {eval_result.combined_score:.3f}")
         
 # Get rule-based factors for display
         rule_factors = evaluator._compute_rule_factors(jd, candidate)
@@ -176,7 +177,7 @@ def test_fastembed_workflow():
     print(f"  Range: {min(combined_scores):.3f} - {max(combined_scores):.3f}")
     
     print("\n" + "="*80)
-    print("✅ FastEmbed Evaluation Complete!")
+    print("[PASS] FastEmbed Evaluation Complete!")
     print("="*80 + "\n")
     
     return results_sorted
@@ -230,6 +231,5 @@ if __name__ == "__main__":
         results = test_fastembed_workflow()
         test_embedding_quality()
     except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
+        print(f"[FAIL] Error: {e}")
         traceback.print_exc()

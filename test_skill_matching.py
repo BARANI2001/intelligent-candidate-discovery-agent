@@ -32,7 +32,7 @@ def test_fuzzy_skill_matching():
     print("\nTesting fuzzy matching algorithm:\n")
     for candidate_skill, jd_skills, expected_match, description in test_cases:
         is_match, score, matched_skill = matcher.find_skill_match(candidate_skill, jd_skills)
-        status = "✓ PASS" if is_match == expected_match else "✗ FAIL"
+        status = "[PASS]" if is_match == expected_match else "[FAIL]"
         print(f"{status} | {description}")
         print(f"       Candidate: '{candidate_skill}' -> Matched: '{matched_skill}' (score: {score:.2f})")
         print()
@@ -134,7 +134,7 @@ def test_experience_scoring():
     
     for years in test_years:
         score, explanation = evaluator.calculate_experience_score(years)
-        print(f"  {years:5.1f} years  →  Score: {score:+6.1f}  |  {explanation}")
+        print(f"  {years:5.1f} years  >  Score: {score:+6.1f}  |  {explanation}")
 
 
 def test_title_relevance():

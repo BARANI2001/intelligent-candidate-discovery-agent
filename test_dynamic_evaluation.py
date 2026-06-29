@@ -10,6 +10,7 @@ Tests the flexible input handling for:
 """
 
 import json
+import traceback
 from app.services.dynamic_evaluation_service import DynamicEvaluationService
 from app.models.candidate import Candidate
 
@@ -27,14 +28,14 @@ def test_dynamic_jd_processing():
     print("\n1.1 Processing JD from text...")
     jd_text = "Senior AI Engineer with 5-9 years experience. Skills: Python, embeddings, vector databases."
     jd = service.process_jd_text(jd_text)
-    print(f"✅ Text JD processed")
+    print(f"[PASS] Text JD processed")
     print(f"   - Length: {len(jd.raw_text)} chars")
     print(f"   - Paragraphs: {jd.paragraph_count}")
     
     # Test 1.2: JD summary
     print("\n1.2 Analyzing JD...")
     summary = service.get_jd_summary(jd)
-    print(f"✅ JD analyzed")
+    print(f"[PASS] JD analyzed")
     print(f"   - Keywords extracted: {summary['keyword_count']}")
     print(f"   - Keywords: {summary['extracted_keywords'][:5]}...")
 
@@ -56,7 +57,7 @@ def test_dynamic_candidate_processing():
     print("\n2.1 Parsing candidates from JSON array...")
     json_str = json.dumps(sample_data)
     candidates = service.parse_candidates_json_list(json_str)
-    print(f"✅ Parsed {len(candidates)} candidates from JSON array")
+    print(f"[PASS] Parsed {len(candidates)} candidates from JSON array")
     
     for c in candidates:
         print(f"   - {c.candidate_id}: {c.profile.current_title}")
@@ -64,24 +65,24 @@ def test_dynamic_candidate_processing():
     # Test 2.2: List format
     print("\n2.2 Parsing candidates from Python list...")
     candidates = service.parse_candidates_json_list(sample_data)
-    print(f"✅ Parsed {len(candidates)} candidates from list")
+    print(f"[PASS] Parsed {len(candidates)} candidates from list")
     
     # Test 2.3: JSONL format
     print("\n2.3 Parsing candidates from JSONL format...")
     jsonl_str = "\n".join(json.dumps(c) for c in sample_data)
     candidates = service.parse_candidates_jsonl(jsonl_str)
-    print(f"✅ Parsed {len(candidates)} candidates from JSONL")
+    print(f"[PASS] Parsed {len(candidates)} candidates from JSONL")
     
     # Test 2.4: Auto-detect format
     print("\n2.4 Auto-detecting candidate format...")
     
     # Auto-detect JSON array
     candidates = service.parse_candidates(json_str)
-    print(f"✅ Auto-detected JSON array: {len(candidates)} candidates")
+    print(f"[PASS] Auto-detected JSON array: {len(candidates)} candidates")
     
     # Auto-detect JSONL
     candidates = service.parse_candidates(jsonl_str)
-    print(f"✅ Auto-detected JSONL: {len(candidates)} candidates")
+    print(f"[PASS] Auto-detected JSONL: {len(candidates)} candidates")
 
 
 def test_schema_validation():
@@ -100,14 +101,14 @@ def test_schema_validation():
     # Test 3.1: Valid candidate
     print("\n3.1 Validating valid candidate...")
     is_valid, msg = service.validate_schema(valid_candidate)
-    print(f"✅ Result: {is_valid} - {msg}")
+    print(f"[PASS] Result: {is_valid} - {msg}")
     
     # Test 3.2: Invalid candidate (missing required field)
     print("\n3.2 Validating invalid candidate (missing field)...")
     invalid_candidate = valid_candidate.copy()
     del invalid_candidate['candidate_id']
     is_valid, msg = service.validate_schema(invalid_candidate)
-    print(f"✅ Result: {is_valid} - Schema validation caught error")
+    print(f"[PASS] Result: {is_valid} - Schema validation caught error")
     print(f"   - {msg[:100]}...")
     
     # Test 3.3: Invalid candidate (wrong type)
@@ -115,7 +116,7 @@ def test_schema_validation():
     invalid_candidate = valid_candidate.copy()
     invalid_candidate['profile']['years_of_experience'] = "six"  # Should be number
     is_valid, msg = service.validate_schema(invalid_candidate)
-    print(f"✅ Result: {is_valid} - Schema validation caught error")
+    print(f"[PASS] Result: {is_valid} - Schema validation caught error")
 
 
 def test_complete_evaluation():
@@ -154,7 +155,7 @@ def test_complete_evaluation():
     try:
         result = service.evaluate(jd_text, candidates_json, format_hint='json_array')
         
-        print(f"✅ Evaluation complete")
+        print(f"[PASS] Evaluation complete")
         print(f"   - Evaluated {len(result.evaluations)} candidates")
         
         # Show top 3
@@ -165,7 +166,7 @@ def test_complete_evaluation():
             print(f"      Combined: {eval_res.combined_score:.3f}")
     
     except Exception as e:
-        print(f"❌ Evaluation failed: {e}")
+        print(f"[FAIL] Evaluation failed: {e}")
 
 
 def test_candidate_summary():
@@ -185,7 +186,7 @@ def test_candidate_summary():
     print("\nGenerating candidate summary...")
     summary = service.get_candidate_summary(candidate)
     
-    print(f"✅ Summary generated:")
+    print(f"[PASS] Summary generated:")
     print(f"   - ID: {summary['candidate_id']}")
     print(f"   - Name: {summary['name']}")
     print(f"   - Title: {summary['title']}")
@@ -206,33 +207,33 @@ def test_error_handling():
     print("\n6.1 Testing empty JD...")
     try:
         service.process_jd_text("")
-        print("❌ Should have raised error")
+        print("[FAIL] Should have raised error")
     except ValueError as e:
-        print(f"✅ Correctly caught error: {str(e)[:50]}...")
+        print(f"[PASS] Correctly caught error: {str(e)[:50]}...")
     
     # Test 6.2: Invalid JSON
     print("\n6.2 Testing invalid JSON...")
     try:
         service.parse_candidates_json_list("not valid json {")
-        print("❌ Should have raised error")
+        print("[FAIL] Should have raised error")
     except ValueError as e:
-        print(f"✅ Correctly caught error: {str(e)[:50]}...")
+        print(f"[PASS] Correctly caught error: {str(e)[:50]}...")
     
     # Test 6.3: Empty candidates
     print("\n6.3 Testing empty candidates...")
     try:
         service.parse_candidates_json_list("[]")
-        print("❌ Should have raised error")
+        print("[FAIL] Should have raised error")
     except ValueError as e:
-        print(f"✅ Correctly caught error: {str(e)[:50]}...")
+        print(f"[PASS] Correctly caught error: {str(e)[:50]}...")
     
     # Test 6.4: Invalid candidate schema
     print("\n6.4 Testing invalid candidate schema...")
     try:
         service.parse_candidates_json_list('[{"invalid": "candidate"}]')
-        print("❌ Should have raised error")
+        print("[FAIL] Should have raised error")
     except ValueError as e:
-        print(f"✅ Correctly caught error: Schema validation")
+        print(f"[PASS] Correctly caught error: Schema validation")
 
 
 if __name__ == "__main__":
@@ -245,10 +246,9 @@ if __name__ == "__main__":
         test_error_handling()
         
         print("\n" + "="*80)
-        print("✅ ALL DYNAMIC EVALUATION TESTS PASSED")
+        print("[PASS] ALL DYNAMIC EVALUATION TESTS PASSED")
         print("="*80 + "\n")
     
     except Exception as e:
-        print(f"\n❌ Test failed: {e}")
-        import traceback
+        print(f"\n[FAIL] Test failed: {e}")
         traceback.print_exc()
