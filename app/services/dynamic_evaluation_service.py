@@ -32,15 +32,11 @@ class DynamicEvaluationService:
     - Efficient batch processing
     """
 
-    def __init__(self, use_fastembed: bool = True):
+    def __init__(self):
         """
         Initialize evaluation service.
-        
-        Args:
-            use_fastembed: Use FastEmbed for embeddings (True) or mock (False)
         """
-        self.evaluator = RelevanceEvaluator(use_fastembed=use_fastembed)
-        self.use_fastembed = use_fastembed
+        self.evaluator = RelevanceEvaluator()
 
     # ========================================================================
     # JD Processing Methods
@@ -396,17 +392,14 @@ class DynamicEvaluationService:
 _dynamic_service = None
 
 
-def get_dynamic_evaluation_service(use_fastembed: bool = True) -> DynamicEvaluationService:
+def get_dynamic_evaluation_service() -> DynamicEvaluationService:
     """
     Get or create global dynamic evaluation service.
-    
-    Args:
-        use_fastembed: Use FastEmbed embeddings
     
     Returns:
         DynamicEvaluationService instance
     """
     global _dynamic_service
     if _dynamic_service is None:
-        _dynamic_service = DynamicEvaluationService(use_fastembed=use_fastembed)
+        _dynamic_service = DynamicEvaluationService()
     return _dynamic_service

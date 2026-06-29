@@ -161,9 +161,9 @@ async def evaluate_relevance(
 
 
 
-# ============================================================================
+
 # NEW DYNAMIC ENDPOINTS - Support various JD and candidate formats
-# ============================================================================
+
 
 @router.post("/evaluate-dynamic", response_model=EvaluationResult)
 async def evaluate_dynamic(
@@ -183,7 +183,7 @@ async def evaluate_dynamic(
     Returns ranked candidates with FastEmbed embeddings + rule-based scores.
     """
     settings = get_settings()
-    service = get_dynamic_evaluation_service(use_fastembed=True)
+    service = get_dynamic_evaluation_service()
 
     # Process JD
     if not jd_text and not jd_file:
@@ -234,7 +234,7 @@ async def validate_candidates(
     
     Returns validation results for each candidate.
     """
-    service = get_dynamic_evaluation_service(use_fastembed=False)
+    service = get_dynamic_evaluation_service()
 
     try:
         candidates = service.parse_candidates(candidates_json)
@@ -262,7 +262,7 @@ async def analyze_jd(
     Returns JD summary with extracted keywords.
     """
     settings = get_settings()
-    service = get_dynamic_evaluation_service(use_fastembed=True)
+    service = get_dynamic_evaluation_service()
 
     if not jd_text and not jd_file:
         raise HTTPException(status_code=400, detail="Provide either jd_text or jd_file")

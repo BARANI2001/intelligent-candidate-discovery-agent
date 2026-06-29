@@ -7,15 +7,11 @@ Key responsibilities:
 - Compute cosine similarity scores (0.0-1.0)
 - Analyze skills & experience fit (0-100)
 - Aggregate into a combined relevance score (0.0-1.0)
-
-Rule-based skill matching uses:
-- Exact and fuzzy keyword matching (Levenshtein distance)
-- Experience level validation with penalties
-- Job title relevance scoring
 """
 
-import json
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
+import os
+import re
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from difflib import SequenceMatcher
@@ -28,75 +24,31 @@ from app.models.evaluation import (
     EvaluationResult,
 )
 from app.services.embedding_service import get_embedding_service
-
-
-class MockEmbeddingModel:
-    """
-    Mock embedding model for development.
-    In production, replace with: OpenAI text-embedding-3-small, BGE, E5, etc.
-    
-    Creates deterministic embeddings using word frequency weighting.
-    """
-
-    EMBEDDING_DIM = 128
-
-    def encode(self, text: str) -> np.ndarray:
-        """Generate a deterministic embedding from text."""
-        import hashlib
-        
-        text_lower = text.lower()[:10000]
-        
-        # Tokenize
-        words = [w.strip('.,;:!?"\'-') for w in text_lower.split() if len(w.strip('.,;:!?"\'-')) > 2]
-        
-        if not words:
-            return np.ones(self.EMBEDDING_DIM, dtype=np.float32) / np.sqrt(self.EMBEDDING_DIM)
-        
-        # Count word frequencies
-        word_freq = {}
-        for word in words:
-            word_freq[word] = word_freq.get(word, 0) + 1
-        
-        # Create weighted embedding
-        embedding = np.zeros(self.EMBEDDING_DIM, dtype=np.float32)
-        total_weight = 0
-        
-        # Process unique words (up to 100)
-        for i, word in enumerate(list(word_freq.keys())[:100]):
-            # Hash the word to get deterministic values
-            word_hash = hashlib.sha256(word.encode()).digest()
-            
-            # Map each byte of hash to embedding dimension
-            for j in range(self.EMBEDDING_DIM):
-                byte_val = word_hash[j % 32]  # 32 bytes from SHA256
-                # Create value in [-1, 1]
-                val = (byte_val / 128.0) - 1.0
-                embedding[j] += val * np.sqrt(word_freq[word])
-            
-            total_weight += np.sqrt(word_freq[word])
-        
-        # Normalize by weight
-        if total_weight > 0:
-            embedding = embedding / total_weight
-        
-        # L2 normalization
-        norm = np.linalg.norm(embedding)
-        if norm > 1e-8:
-            embedding = embedding / norm
-        else:
-            embedding = np.ones(self.EMBEDDING_DIM, dtype=np.float32) / np.sqrt(self.EMBEDDING_DIM)
-        
-        # Ensure finite
-        embedding = np.nan_to_num(embedding, nan=0.0, posinf=0.0, neginf=0.0)
-        return embedding.astype(np.float32)
-
+from app.constants import (
+    TITLE_MATCH_MAX_SCORE,
+    TITLE_KEYWORD_MULTIPLIER,
+    SCORING_VALUES,
+    EXPERIENCE_TARGET_MIN,
+    EXPERIENCE_TARGET_MAX,
+    EXPERIENCE_BASE_SCORE,
+    FUZZY_THRESHOLD,
+    VECTOR_SIMILARITY_WEIGHT,
+    RULE_BASED_WEIGHT,
+)
+# Validate weights sum to approximately 1.0
+_total_weight = VECTOR_SIMILARITY_WEIGHT + RULE_BASED_WEIGHT
+if not (0.99 <= _total_weight <= 1.01):
+    raise ValueError(
+        f"Weightages must sum to 1.0. "
+        f"Got {VECTOR_SIMILARITY_WEIGHT} + {RULE_BASED_WEIGHT} = {_total_weight}"
+    )
 
 class RuleBasedSkillMatcher:
     """
     Rule-based skill matching using exact and fuzzy matching with Levenshtein distance.
     """
     
-    FUZZY_THRESHOLD = 0.75  # 75% similarity for fuzzy match
+    FUZZY_THRESHOLD = FUZZY_THRESHOLD  # 75% similarity for fuzzy match
     
     @staticmethod
     def levenshtein_distance(s1: str, s2: str) -> float:
@@ -187,77 +139,31 @@ class RelevanceEvaluator:
     - Behavioral signal analysis
     """
 
-    def __init__(self, use_fastembed: bool = True):
+    def __init__(self):
         """
-        Initialize evaluator.
-        
-        Args:
-            use_fastembed: Use FastEmbed for embeddings (True) or mock embeddings (False)
+        Initialize evaluator using FastEmbed.
         """
-        self.embedding_service = get_embedding_service() if use_fastembed else None
+        self.embedding_service = get_embedding_service()
         self.skill_matcher = RuleBasedSkillMatcher()
-        
-        # JD requirements keywords (from actual JD: Senior AI Engineer @ Redrob)
-        self.jd_keywords = {
-            "must_have": {
-                "embeddings": ["embedding", "embeddings", "sentence-transformer", "openai embedding", "bge", "e5"],
-                "retrieval": ["retrieval", "semantic search", "rag", "dense retrieval", "hybrid search"],
-                "vector_db": ["pinecone", "weaviate", "qdrant", "milvus", "opensearch", "elasticsearch", "faiss", "vector database"],
-                "python": ["python", "pyspark", "sklearn", "numpy", "pandas"],
-                "ranking": ["ranking", "ndcg", "mrr", "map", "evaluation", "relevance"],
-            },
-            "nice_to_have": {
-                "learning_to_rank": ["learning-to-rank", "l2r", "xgboost", "neural rank", "ranknet"],
-                "hrtech": ["recruiting", "hr-tech", "talent", "recruitment", "candidate matching", "job matching"],
-                "distributed": ["distributed", "kafka", "spark", "mapreduce", "hadoop"],
-                "opensource": ["github", "open-source", "opensource", "repository", "contrib"],
-            },
-            "disqualifiers": {
-                "pure_research": ["research", "academic", "phd", "postdoc"],
-                "recent_langchain": ["langchain", "openai api", "chatgpt wrapper"],
-                "no_recent_code": ["architect", "tech lead", "manager", "no production"],
-                "only_consulting": ["tcs", "infosys", "wipro", "accenture", "cognizant", "capgemini"],
-                "cv_only": ["computer vision", "cv specialist", "speech recognition", "robotics"],
-            },
-        }
 
     def generate_jd_embedding(self, jd: JobDescription) -> np.ndarray:
         """Generate embedding for job description using FastEmbed."""
-        if self.embedding_service:
-            # Use FastEmbed for real embeddings
-            text = jd.raw_text[:2000]
-            return self.embedding_service.embed_text(text)
-        else:
-            # Fallback to mock embeddings
-            text = jd.raw_text[:2000]
-            # Use mock embedding (for backward compatibility)
-            return np.random.randn(384).astype(np.float32)
+        return self.embedding_service.embed_text(jd.raw_text)
 
     def generate_candidate_embedding(self, candidate: Candidate) -> np.ndarray:
         """Generate embedding for candidate profile using FastEmbed."""
-        # Concatenate relevant fields
-        profile_text = f"""
-        {candidate.profile.headline}
-        {candidate.profile.summary}
-        """
+        # Concatenate all relevant fields without truncation
+        profile_text = f"{candidate.profile.headline} {candidate.profile.summary}"
 
-        # Add career history
-        for job in candidate.career_history[:3]:  # Recent 3 jobs
+        # Add full career history
+        for job in candidate.career_history:
             profile_text += f" {job.title} {job.description} {job.company}"
 
-        # Add skills
-        skills_text = " ".join([s.name for s in candidate.skills[:20]])
+        # Add all skills
+        skills_text = " ".join([s.name for s in candidate.skills])
         profile_text += f" Skills: {skills_text}"
-
-        # Use first 2000 chars
-        text = profile_text[:2000]
         
-        if self.embedding_service:
-            # Use FastEmbed for real embeddings
-            return self.embedding_service.embed_text(text)
-        else:
-            # Fallback to mock embeddings
-            return np.random.randn(384).astype(np.float32)
+        return self.embedding_service.embed_text(profile_text)
 
     def compute_vector_similarity(
         self, jd: JobDescription, candidate: Candidate
@@ -267,77 +173,125 @@ class RelevanceEvaluator:
         candidate_embedding = self.generate_candidate_embedding(candidate)
 
         # Normalize embeddings for cosine similarity
-        if self.embedding_service:
-            similarity = self.embedding_service.cosine_similarity(jd_embedding, candidate_embedding)
-        else:
-            # Fallback: use sklearn
-            jd_vec = jd_embedding.reshape(1, -1)
-            cand_vec = candidate_embedding.reshape(1, -1)
-            similarity = float(cosine_similarity(jd_vec, cand_vec)[0][0])
+        similarity = self.embedding_service.cosine_similarity(jd_embedding, candidate_embedding)
 
         # Clamp to [0, 1]
         similarity = float(np.clip(similarity, 0.0, 1.0))
 
         return VectorSimilarityResult(cosine_similarity=similarity)
 
-    def extract_jd_required_skills(self, jd: JobDescription) -> List[str]:
+    def extract_jd_requirements(self, jd: JobDescription) -> Dict[str, Any]:
         """
-        Extract required skills from JD text.
-        Uses keyword matching from must-have and nice-to-have categories.
+        Dynamically extract requirements from JD text using structural parsing.
         """
-        jd_text_lower = jd.raw_text.lower()
-        extracted_skills = set()
+        jd_text = jd.raw_text
+        jd_lower = jd_text.lower()
         
-        # Collect all keywords from must-have and nice-to-have
-        all_categories = list(self.jd_keywords["must_have"].values()) + \
-                         list(self.jd_keywords["nice_to_have"].values())
+        requirements = {
+            "must_have": [],
+            "nice_to_have": [],
+            "disqualifiers": [],
+            "title_keywords": [],
+            "experience": {
+                "min": EXPERIENCE_TARGET_MIN,
+                "max": EXPERIENCE_TARGET_MAX
+            }
+        }
+
+        # 1. Experience extraction
+        exp_match = re.search(r'(\d+)\s*[-–to]+\s*(\d+)\s*years?', jd_lower)
+        if exp_match:
+            requirements["experience"]["min"] = float(exp_match.group(1))
+            requirements["experience"]["max"] = float(exp_match.group(2))
+
+        # 2. Title keyword extraction (Look at first non-empty line, skip generic headers)
+        lines = [l.strip() for s in jd_text.split('\n') if (l := s.strip())]
+        if lines:
+            for line in lines[:3]: # Check first 3 lines
+                line_lower = line.lower().strip(" :")
+                if line_lower in ["overview", "scope", "about the role", "introduction", "job description"]:
+                    continue
+                # Clean the title
+                clean_title = re.sub(r'[^\w\s]', ' ', line)
+                words = [w for w in clean_title.split() if len(w) > 1 and w.lower() not in ["the", "and", "for", "with", "of", "at", "in", "to", "company"]]
+                if words:
+                    requirements["title_keywords"] = words
+                    break
+
+        # 3. Structural Keyword Extraction
+        current_section = "must_have"
         
-        for category_keywords in all_categories:
-            for keyword in category_keywords:
-                if keyword in jd_text_lower:
-                    extracted_skills.add(keyword)
-        
-        return sorted(list(extracted_skills))
+        for line in lines:
+            line_lower = line.lower().strip(" :")
+            
+            # Detect section headers
+            if any(h in line_lower for h in ["look", "requirement", "qualif", "skill", "must have"]):
+                current_section = "must_have"
+                continue
+            elif any(h in line_lower for h in ["nice to have", "preferred", "bonus", "plus", "advantage"]):
+                current_section = "nice_to_have"
+                continue
+            elif any(h in line_lower for h in ["disqualifiers", "not looking for"]):
+                current_section = "disqualifiers"
+                continue
+                
+            # Extract bullet points OR lines that look like requirements (start with cap or verb)
+            # Match: symbol OR capitalized word OR specific keywords like 'Strong', 'Experience', 'Familiarity'
+            is_requirement = re.match(r'^[-*•]\s+', line.strip()) or \
+                            (re.match(r'^[A-Z]', line.strip()) and len(line.split()) > 3) or \
+                            any(line.strip().startswith(w) for w in ["Strong", "Experience", "Knowledge", "Ability", "Familiarity"])
+            
+            if is_requirement:
+                # Clean the item
+                clean_item = re.sub(r'^[-*•]\s+', '', line.strip())
+                # Split by delimiters
+                skills = re.split(r',|\sand\s|\sor\s|\/', clean_item)
+                for skill in skills:
+                    skill_clean = skill.strip(" .;")
+                    # Keep short phrases (1-5 words)
+                    if 0 < len(skill_clean.split()) <= 5:
+                        requirements[current_section].append(skill_clean)
+
+        # Deduplicate and remove empties
+        requirements["must_have"] = list(set([s for s in requirements["must_have"] if s]))
+        requirements["nice_to_have"] = list(set([s for s in requirements["nice_to_have"] if s]))
+        requirements["disqualifiers"] = list(set([s for s in requirements["disqualifiers"] if s]))
+
+        return requirements
 
     def calculate_experience_score(
-        self, candidate_years: float, target_min: float = 5.0, target_max: float = 9.0
+        self, 
+        candidate_years: float, 
+        target_min: float = EXPERIENCE_TARGET_MIN, 
+        target_max: float = EXPERIENCE_TARGET_MAX
     ) -> Tuple[float, str]:
         """
         Calculate experience score with penalties for gaps.
-        
-        Scoring:
-        - Perfect match (target_min <= years <= target_max): +10
-        - Slightly below (target_min - 1 <= years < target_min): +5
-        - Slightly above (target_max < years <= target_max + 3): +7
-        - Significantly above (years > target_max + 3): +3
-        - Significantly below (years < target_min - 1): -15 (penalty)
-        
-        Returns:
-            (score: float, explanation: str)
         """
         if target_min <= candidate_years <= target_max:
-            return 10.0, f"✓ Target experience range ({candidate_years:.1f} yrs)"
+            return 10.0, f"[MATCH] Target experience range ({candidate_years:.1f} yrs)"
         elif target_min - 1 <= candidate_years < target_min:
-            return 5.0, f"~ Slightly below range ({candidate_years:.1f} yrs)"
+            return 5.0, f"[APPROX] Slightly below range ({candidate_years:.1f} yrs)"
         elif target_max < candidate_years <= target_max + 3:
-            return 7.0, f"~ Slightly above range ({candidate_years:.1f} yrs)"
+            return 7.0, f"[APPROX] Slightly above range ({candidate_years:.1f} yrs)"
         elif candidate_years > target_max + 3:
-            return 3.0, f"~ Much above range ({candidate_years:.1f} yrs)"
+            return 3.0, f"[APPROX] Much above range ({candidate_years:.1f} yrs)"
         else:
-            penalty = min(-15.0, -(target_min - candidate_years) * 5)  # Proportional penalty
-            return penalty, f"✗ Below range ({candidate_years:.1f} yrs)"
+            penalty = min(-15.0, -(target_min - candidate_years) * 5)
+            return penalty, f"[FAIL] Below range ({candidate_years:.1f} yrs)"
 
     def calculate_title_relevance(
-        self, candidate_current_title: str, candidate_history_titles: List[str], jd_text: str
+        self, 
+        candidate_current_title: str, 
+        candidate_history_titles: List[str], 
+        target_keywords: List[str]
     ) -> Tuple[float, str]:
         """
-        Compare job titles using fuzzy matching.
-        
-        Returns:
-            (score: 0-15, explanation: str)
+        Compare job titles using dynamically extracted keywords.
         """
-        target_keywords = ["senior", "engineer", "ai", "ml", "machine learning", "lead", "architect"]
-        
+        if not target_keywords:
+            return 0.0, "[INFO] No title keywords found in JD"
+
         titles_to_check = [candidate_current_title] + candidate_history_titles[:3]
         
         best_score = 0.0
@@ -349,48 +303,40 @@ class RelevanceEvaluator:
             # Check for target keywords
             keyword_matches = sum(1 for kw in target_keywords if kw in title_lower)
             if keyword_matches > 0:
-                best_score = max(best_score, min(10.0, keyword_matches * 3))
-                best_match = title
+                score = min(TITLE_MATCH_MAX_SCORE, keyword_matches * TITLE_KEYWORD_MULTIPLIER)
+                if score > best_score:
+                    best_score = score
+                    best_match = title
         
         if best_score > 0:
-            return best_score, f"✓ Relevant title: '{best_match}'"
+            return best_score, f"[MATCH] Relevant title: '{best_match}'"
         else:
-            return 0.0, f"? Non-technical title: '{candidate_current_title}'"
+            return 0.0, f"[INFO] Non-technical title: '{candidate_current_title}'"
 
     def calculate_rule_based_score(self, jd: JobDescription, candidate: Candidate) -> int:
         """
         Calculate rule-based skill and experience match score (0-100).
-        
-        Scoring approach:
-        1. Extract required skills from JD
-        2. Calculate Skill Match Score using exact and fuzzy matching (0-100)
-        3. Calculate experience score with penalties for gaps
-        4. Calculate title relevance score
-        5. Check for disqualifiers
-        6. Consider behavioral signals
-        
-        Returns score 0-100.
         """
-        score = 40  # Base score
-        factors = []  # Track scoring factors
+        # Dynamically extract requirements for this specific JD
+        requirements = self.extract_jd_requirements(jd)
         
-        # Prepare candidate text for analysis
+        score = EXPERIENCE_BASE_SCORE
+        factors = []
+        
         candidate_skills_names = [s.name for s in candidate.skills]
-        skills_text = " ".join([s.lower() for s in candidate_skills_names])
         career_desc = " ".join([job.description.lower() for job in candidate.career_history])
         career_titles = [job.title for job in candidate.career_history]
-        all_text = f"{candidate.profile.summary.lower()} {career_desc} {skills_text}".lower()
+        all_text = f"{candidate.profile.summary.lower()} {career_desc} {' '.join([s.lower() for s in candidate_skills_names])}".lower()
         
         # ============ SKILL MATCHING ============
-        jd_required_skills = self.extract_jd_required_skills(jd)
+        jd_all_skills = requirements["must_have"] + requirements["nice_to_have"]
         
-        if jd_required_skills:
+        if jd_all_skills:
             skill_match_score, matched, unmatched = self.skill_matcher.calculate_skill_match_score(
-                candidate_skills_names, jd_required_skills
+                candidate_skills_names, jd_all_skills
             )
             
-            # Apply skill match to overall score
-            skill_contribution = (skill_match_score / 100.0) * 25  # Max 25 points
+            skill_contribution = (skill_match_score / 100.0) * SCORING_VALUES["skill_match_max_contribution"]
             score += skill_contribution
             
             if skill_match_score >= 80:
@@ -399,13 +345,12 @@ class RelevanceEvaluator:
                 factors.append((f"Medium skill match ({skill_match_score:.0f}%)", skill_contribution))
             else:
                 factors.append((f"Low skill match ({skill_match_score:.0f}%)", skill_contribution))
-            
-            if unmatched:
-                factors.append((f"Missing: {', '.join(unmatched[:2])}", 0))
         
         # ============ EXPERIENCE MATCHING ============
         exp_score, exp_explanation = self.calculate_experience_score(
-            candidate.profile.years_of_experience
+            candidate.profile.years_of_experience,
+            target_min=requirements["experience"]["min"],
+            target_max=requirements["experience"]["max"]
         )
         score += exp_score
         factors.append((exp_explanation, exp_score))
@@ -414,103 +359,62 @@ class RelevanceEvaluator:
         title_score, title_explanation = self.calculate_title_relevance(
             candidate.profile.current_title,
             career_titles,
-            jd.raw_text
+            requirements["title_keywords"]
         )
         score += title_score
         if title_score > 0:
             factors.append((title_explanation, title_score))
         
-        # ============ MUST-HAVE KEYWORDS ============
-        must_have_matches = 0
+        # ============ KEYWORD ANALYSIS ============
+        # Score must-haves
+        for mw in requirements["must_have"]:
+            if mw in all_text:
+                score += SCORING_VALUES["must_have_bonus"]
+                factors.append((f"[MATCH] Found must-have: {mw}", SCORING_VALUES["must_have_bonus"]))
         
-        if any(keyword in all_text for keyword in self.jd_keywords["must_have"]["embeddings"]):
-            must_have_matches += 1
-            factors.append(("✓ Embeddings/retrieval experience", 5))
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["must_have"]["vector_db"]):
-            must_have_matches += 1
-            factors.append(("✓ Vector database experience", 5))
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["must_have"]["ranking"]):
-            must_have_matches += 1
-            factors.append(("✓ Ranking/evaluation experience", 5))
-        
-        score += must_have_matches * 2
-        
-        # ============ NICE-TO-HAVE ============
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["nice_to_have"]["learning_to_rank"]):
-            score += 5
-            factors.append(("✓ Learning-to-rank experience", 5))
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["nice_to_have"]["hrtech"]):
-            score += 3
-            factors.append(("✓ HR-tech domain experience", 3))
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["nice_to_have"]["opensource"]):
-            score += 3
-            factors.append(("✓ Open-source contributions", 3))
-        
-        # ============ DISQUALIFIERS ============
-        
-        pure_research = any(
-            keyword in career_titles for keyword in ["research", "academic", "phd"]
-        ) and "production" not in career_desc
-        
-        if pure_research and candidate.profile.years_of_experience > 4:
-            score -= 20
-            factors.append(("✗ Pure research background", -20))
-        
-        only_consulting = all(
-            company.lower().strip() in ["tcs", "infosys", "wipro", "accenture", "cognizant", "capgemini", "mindtree"]
-            for company in [job.company.lower() for job in candidate.career_history]
-        ) and len(candidate.career_history) >= 2
-        
-        if only_consulting:
-            score -= 15
-            factors.append(("✗ Consulting firm only", -15))
-        
-        cv_only = any(
-            keyword in career_desc for keyword in self.jd_keywords["disqualifiers"]["cv_only"]
-        ) and "nlp" not in career_desc and "retrieval" not in career_desc
-        
-        if cv_only:
-            score -= 15
-            factors.append(("✗ CV/robotics primary", -15))
-        
+        # Score nice-to-haves
+        for nh in requirements["nice_to_have"]:
+            if nh in all_text:
+                score += SCORING_VALUES["opensource_bonus"]
+                factors.append((f"[MATCH] Found nice-to-have: {nh}", SCORING_VALUES["opensource_bonus"]))
+
+        # Check disqualifiers
+        for dq in requirements["disqualifiers"]:
+            if dq in all_text or any(dq in t.lower() for t in career_titles):
+                score += SCORING_VALUES["cv_only_penalty"]
+                factors.append((f"[FAIL] Found disqualifier: {dq}", SCORING_VALUES["cv_only_penalty"]))
+
         # ============ BEHAVIORAL SIGNALS ============
-        
         if candidate.redrob_signals.open_to_work_flag:
-            score += 2
-            factors.append(("✓ Open to work", 2))
+            score += SCORING_VALUES["open_to_work_bonus"]
+            factors.append(("[MATCH] Open to work", SCORING_VALUES["open_to_work_bonus"]))
         else:
-            score -= 3
-            factors.append(("✗ Not actively looking", -3))
+            score += SCORING_VALUES["not_actively_looking_penalty"]
+            factors.append(("[FAIL] Not actively looking", SCORING_VALUES["not_actively_looking_penalty"]))
         
         if candidate.redrob_signals.recruiter_response_rate > 0.7:
-            score += 3
-            factors.append((f"✓ High engagement ({candidate.redrob_signals.recruiter_response_rate:.0%})", 3))
+            score += SCORING_VALUES["high_engagement_bonus"]
+            factors.append((f"[MATCH] High engagement ({candidate.redrob_signals.recruiter_response_rate:.0%})", SCORING_VALUES["high_engagement_bonus"]))
         elif candidate.redrob_signals.recruiter_response_rate < 0.3:
-            score -= 3
-            factors.append((f"✗ Low engagement ({candidate.redrob_signals.recruiter_response_rate:.0%})", -3))
+            score += SCORING_VALUES["low_engagement_penalty"]
+            factors.append((f"[FAIL] Low engagement ({candidate.redrob_signals.recruiter_response_rate:.0%})", SCORING_VALUES["low_engagement_penalty"]))
         
         if candidate.redrob_signals.github_activity_score >= 60:
-            score += 3
-            factors.append((f"✓ Strong GitHub ({candidate.redrob_signals.github_activity_score}/100)", 3))
+            score += SCORING_VALUES["strong_github_bonus"]
+            factors.append((f"[MATCH] Strong GitHub ({candidate.redrob_signals.github_activity_score}/100)", SCORING_VALUES["strong_github_bonus"]))
         
         notice = candidate.redrob_signals.notice_period_days
         if notice <= 30:
-            score += 2
-            factors.append((f"✓ Quick notice ({notice} days)", 2))
+            score += SCORING_VALUES["quick_notice_bonus"]
+            factors.append((f"[MATCH] Quick notice ({notice} days)", SCORING_VALUES["quick_notice_bonus"]))
         elif notice > 90:
-            score -= 3
-            factors.append((f"✗ Long notice ({notice} days)", -3))
+            score += SCORING_VALUES["long_notice_penalty"]
+            factors.append((f"[FAIL] Long notice ({notice} days)", SCORING_VALUES["long_notice_penalty"]))
         
         if candidate.profile.country.lower() == "india":
-            score += 2
-            factors.append(("✓ India-based", 2))
+            score += SCORING_VALUES["india_based_bonus"]
+            factors.append(("[MATCH] India-based", SCORING_VALUES["india_based_bonus"]))
         
-        # Clamp to 0-100 range
         return int(np.clip(score, 0, 100))
 
     def evaluate_candidate(
@@ -523,9 +427,9 @@ class RelevanceEvaluator:
         # Get rule-based score
         rule_based_score = self.calculate_rule_based_score(jd, candidate)
 
-        # Combine scores (normalize rule-based score to 0-1, then blend)
+        # Combine scores
         rule_normalized = rule_based_score / 100.0
-        combined_score = 0.4 * vector_sim.cosine_similarity + 0.6 * rule_normalized
+        combined_score = VECTOR_SIMILARITY_WEIGHT * vector_sim.cosine_similarity + RULE_BASED_WEIGHT * rule_normalized
 
         return RelevanceEvaluation(
             candidate_id=candidate.candidate_id,
@@ -537,26 +441,17 @@ class RelevanceEvaluator:
     def _compute_rule_factors(self, jd: JobDescription, candidate: Candidate) -> str:
         """
         Compute top factors for rule-based scoring (for display in tests).
-        Returns a string with top 3 factors.
         """
+        requirements = self.extract_jd_requirements(jd)
         factors = []
-        score = 40
         
         candidate_skills_names = [s.name for s in candidate.skills]
-        career_desc = " ".join([job.description.lower() for job in candidate.career_history])
-        career_titles = [job.title for job in candidate.career_history]
-        all_text = f"{candidate.profile.summary.lower()} {career_desc}".lower()
-        skills_text = " ".join([s.lower() for s in candidate_skills_names]).lower()
+        jd_all_skills = requirements["must_have"] + requirements["nice_to_have"]
         
-        jd_required_skills = self.extract_jd_required_skills(jd)
-        
-        if jd_required_skills:
+        if jd_all_skills:
             skill_match_score, matched, unmatched = self.skill_matcher.calculate_skill_match_score(
-                candidate_skills_names, jd_required_skills
+                candidate_skills_names, jd_all_skills
             )
-            skill_contribution = (skill_match_score / 100.0) * 25
-            score += skill_contribution
-            
             if skill_match_score >= 80:
                 factors.append(f"High skill match ({skill_match_score:.0f}%)")
             elif skill_match_score >= 50:
@@ -567,90 +462,14 @@ class RelevanceEvaluator:
             if unmatched:
                 factors.append(f"Missing: {', '.join(unmatched[:2])}")
         
-        exp_score, exp_explanation = self.calculate_experience_score(candidate.profile.years_of_experience)
-        score += exp_score
+        exp_score, exp_explanation = self.calculate_experience_score(
+            candidate.profile.years_of_experience,
+            target_min=requirements["experience"]["min"],
+            target_max=requirements["experience"]["max"]
+        )
         factors.append(exp_explanation)
         
-        title_score, title_explanation = self.calculate_title_relevance(
-            candidate.profile.current_title, career_titles, jd.raw_text
-        )
-        score += title_score
-        if title_score > 0:
-            factors.append(title_explanation)
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["must_have"]["embeddings"]):
-            factors.append("✓ Embeddings experience")
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["must_have"]["vector_db"]):
-            factors.append("✓ Vector database experience")
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["nice_to_have"]["learning_to_rank"]):
-            factors.append("✓ Learning-to-rank experience")
-        
-        if any(keyword in all_text for keyword in self.jd_keywords["nice_to_have"]["hrtech"]):
-            factors.append("✓ HR-tech domain experience")
-        
         return "; ".join(factors[:3])
-    
-    def _get_factor_score(self, factor: str) -> float:
-        """Get score contribution for a factor string."""
-        if "High skill match" in factor:
-            return 25.0
-        elif "Medium skill match" in factor:
-            return 12.5
-        elif "Low skill match" in factor:
-            return 6.25
-        elif "Missing" in factor:
-            return 0.0
-        elif "Target experience" in factor:
-            return 10.0
-        elif "Slightly below" in factor:
-            return 5.0
-        elif "Slightly above" in factor:
-            return 7.0
-        elif "Much above" in factor:
-            return 3.0
-        elif "Below range" in factor:
-            return -15.0
-        elif "Relevant title" in factor:
-            return 10.0
-        elif "Non-technical" in factor:
-            return 0.0
-        elif "Embeddings experience" in factor:
-            return 5.0
-        elif "Vector database experience" in factor:
-            return 5.0
-        elif "Ranking experience" in factor:
-            return 5.0
-        elif "Learning-to-rank experience" in factor:
-            return 5.0
-        elif "HR-tech domain experience" in factor:
-            return 3.0
-        elif "Open-source contributions" in factor:
-            return 3.0
-        elif "Pure research background" in factor:
-            return -20.0
-        elif "Consulting firm" in factor:
-            return -15.0
-        elif "CV/robotics primary" in factor:
-            return -15.0
-        elif "Open to work" in factor:
-            return 2.0
-        elif "Not actively looking" in factor:
-            return -3.0
-        elif "High engagement" in factor:
-            return 3.0
-        elif "Low engagement" in factor:
-            return -3.0
-        elif "Strong GitHub" in factor:
-            return 3.0
-        elif "Quick notice" in factor:
-            return 2.0
-        elif "Long notice" in factor:
-            return -3.0
-        elif "India-based" in factor:
-            return 2.0
-        return 0.0
 
     def evaluate_all_candidates(
         self, jd: JobDescription, candidates: List[Candidate]
@@ -664,15 +483,14 @@ class RelevanceEvaluator:
         # Sort by combined_score descending
         evaluations.sort(key=lambda x: x.combined_score, reverse=True)
 
-        # Extract JD summary from actual JD requirements
-        jd_summary = """
-        Senior AI Engineer (Founding Team) @ Redrob
-        
-        Must-have: Production embeddings/retrieval systems, Vector databases, Strong Python, Ranking evaluation frameworks.
-        Nice-to-have: Learning-to-rank models, HR-tech experience, Distributed systems.
-        Disqualifiers: Pure research background, Recent LangChain-only projects, No production code in 18 months, Only consulting firm experience.
-        
-        Location: India (Pune/Noida preferred, Tier-1 cities welcome). Notice: <30 days preferred.
+        # Dynamic JD Summary
+        requirements = self.extract_jd_requirements(jd)
+        title_str = " ".join(requirements["title_keywords"]).title()
+        jd_summary = f"""
+Job Role: {title_str}
+Experience: {requirements['experience']['min']}-{requirements['experience']['max']} years
+Must-have: {", ".join(requirements['must_have'][:5])}
+Nice-to-have: {", ".join(requirements['nice_to_have'][:5])}
         """.strip()
 
         return EvaluationResult(

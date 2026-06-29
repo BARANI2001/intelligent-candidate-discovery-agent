@@ -2,7 +2,7 @@
 Embedding Service using FastEmbed
 
 Provides efficient embeddings for job descriptions and candidate profiles
-using the BAAI/bge-small-en-v1.5 model via FastEmbed.
+using FastEmbed's highest-dimension BGE (BAAI General Embedding) models.
 """
 
 from typing import List
@@ -10,33 +10,32 @@ import numpy as np
 from fastembed import TextEmbedding
 
 
+# FastEmbed model configuration
+DEFAULT_MODEL = "BAAI/bge-large-en-v1.5"
+EMBEDDING_DIMENSION = 1024
+
+
 class EmbeddingService:
     """
     Embedding service using FastEmbed for efficient, local embeddings.
     
-    Model: BAAI/bge-small-en-v1.5 (384-dimensional)
-    - Optimized for semantic search
-    - Fast inference (~100ms for batch)
+    Model: BAAI/bge-large-en-v1.5 (1024-dimensional)
+    - Highest quality semantic embeddings
+    - Optimized for semantic search and relevance matching
     - Runs locally without API calls
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5"):
-        """
-        Initialize embedding model.
-        
-        Args:
-            model_name: FastEmbed model identifier
-                Default: BAAI/bge-small-en-v1.5 (recommended for semantic search)
-                Alternatives: BAAI/bge-base-en-v1.5, gte-small, etc.
-        """
-        self.model_name = model_name
+    def __init__(self):
+        """Initialize embedding model with hardcoded high-dimension model."""
+        self.model_name = DEFAULT_MODEL
+        self._dimension = EMBEDDING_DIMENSION
         self._embedding_model = None
 
     @property
     def embedding_model(self) -> TextEmbedding:
         """Lazy-load embedding model on first access."""
         if self._embedding_model is None:
-            self._embedding_model = TextEmbedding(model=self.model_name)
+            self._embedding_model = TextEmbedding(model_name=self.model_name)
         return self._embedding_model
 
     def embed_text(self, text: str) -> np.ndarray:
@@ -44,25 +43,24 @@ class EmbeddingService:
         Generate embedding for a single text.
         
         Args:
-            text: Text to embed (truncated to 8192 chars for safety)
+            text: Text to embed (full text, no truncation)
         
         Returns:
-            Embedding vector as numpy array (384-dimensional)
+            Embedding vector as numpy array (1024-dimensional by default)
         """
         if not text or not isinstance(text, str):
             text = ""
         
-        # Truncate to avoid issues
-        text = text[:8192].strip()
+        # Clean and normalize text
+        text = text.strip()
         
         if not text:
             # Return zero embedding for empty text
-            return np.zeros(384, dtype=np.float32)
+            return np.zeros(self._dimension, dtype=np.float32)
         
         # FastEmbed returns generator, get first result
         embeddings = list(self.embedding_model.embed([text]))
         embedding = np.array(embeddings[0], dtype=np.float32)
-        print(embeddings, embedding)
         
         return embedding
 
@@ -74,16 +72,16 @@ class EmbeddingService:
             texts: List of texts to embed
         
         Returns:
-            List of embedding vectors (384-dimensional each)
+            List of embedding vectors (1024-dimensional by default)
         """
         if not texts:
             return []
         
-        # Truncate and clean texts
+        # Clean texts without truncation
         cleaned_texts = []
         for text in texts:
             if text and isinstance(text, str):
-                cleaned_texts.append(text[:8192].strip())
+                cleaned_texts.append(text.strip())
             else:
                 cleaned_texts.append("")
         
@@ -96,7 +94,7 @@ class EmbeddingService:
             if cleaned_texts[i]:  # Non-empty text
                 result.append(np.array(embedding, dtype=np.float32))
             else:  # Empty text
-                result.append(np.zeros(384, dtype=np.float32))
+                result.append(np.zeros(self._dimension, dtype=np.float32))
         
         return result
 
@@ -108,16 +106,16 @@ class EmbeddingService:
             jd_keywords: List of keywords extracted from JD
         
         Returns:
-            Mean-pooled embedding (384-dimensional)
+            Mean-pooled embedding (1024-dimensional by default)
         """
         if not jd_keywords:
-            return np.zeros(384, dtype=np.float32)
+            return np.zeros(self._dimension, dtype=np.float32)
         
         embeddings = self.embed_texts(jd_keywords)
         embeddings = [e for e in embeddings if e is not None]
         
         if not embeddings:
-            return np.zeros(384, dtype=np.float32)
+            return np.zeros(self._dimension, dtype=np.float32)
         
         # Mean pooling of keyword embeddings
         return np.mean(embeddings, axis=0).astype(np.float32)
@@ -130,16 +128,16 @@ class EmbeddingService:
             skills: List of candidate's skills
         
         Returns:
-            Mean-pooled embedding (384-dimensional)
+            Mean-pooled embedding (1024-dimensional by default)
         """
         if not skills:
-            return np.zeros(384, dtype=np.float32)
+            return np.zeros(self._dimension, dtype=np.float32)
         
         embeddings = self.embed_texts(skills)
         embeddings = [e for e in embeddings if e is not None]
         
         if not embeddings:
-            return np.zeros(384, dtype=np.float32)
+            return np.zeros(self._dimension, dtype=np.float32)
         
         # Mean pooling of skill embeddings
         return np.mean(embeddings, axis=0).astype(np.float32)
@@ -149,6 +147,9 @@ class EmbeddingService:
         """
         Calculate cosine similarity between two embeddings.
         
+        FastEmbed doesn't provide a built-in similarity function, so we use
+        numpy for efficient computation.
+        
         Args:
             embedding1: First embedding vector
             embedding2: Second embedding vector
@@ -156,25 +157,22 @@ class EmbeddingService:
         Returns:
             Cosine similarity score (0.0-1.0)
         """
-        # Normalize embeddings
+        # Normalize embeddings using numpy's linalg
         norm1 = np.linalg.norm(embedding1)
         norm2 = np.linalg.norm(embedding2)
         
         if norm1 == 0 or norm2 == 0:
             return 0.0
         
-        embedding1_norm = embedding1 / norm1
-        embedding2_norm = embedding2 / norm2
+        # Use numpy's efficient dot product on normalized vectors
+        similarity = float(np.dot(embedding1 / norm1, embedding2 / norm2))
         
-        # Cosine similarity
-        similarity = float(np.dot(embedding1_norm, embedding2_norm))
-        
-        # Clamp to [0, 1]
+        # Clamp to [0, 1] for cosine similarity
         return max(0.0, min(1.0, similarity))
 
     def get_embedding_dimension(self) -> int:
         """Get dimension of embeddings produced by this model."""
-        return 384  # BAAI/bge-small-en-v1.5 uses 384 dimensions
+        return self._dimension
 
 
 # Global instance for reuse
@@ -182,7 +180,14 @@ _embedding_service = None
 
 
 def get_embedding_service() -> EmbeddingService:
-    """Get or create global embedding service instance."""
+    """
+    Get or create global embedding service instance.
+    
+    Uses BAAI/bge-large-en-v1.5 (1024-dim) for best quality.
+    
+    Returns:
+        EmbeddingService instance with 1024-dimensional embeddings
+    """
     global _embedding_service
     if _embedding_service is None:
         _embedding_service = EmbeddingService()
