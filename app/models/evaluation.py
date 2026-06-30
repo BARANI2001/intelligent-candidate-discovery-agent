@@ -27,6 +27,19 @@ class RelevanceEvaluation(BaseModel):
     )
 
 
+class BehavioralEvaluation(BaseModel):
+    """Behavioral and career trajectory evaluation for a single candidate."""
+    candidate_id: str
+    tenure_score: float = Field(ge=0, le=100, description="Score based on average tenure and job hopping.")
+    progression_score: float = Field(ge=0, le=100, description="Score based on seniority promotions or demotions.")
+    composite_behavioral_score: float = Field(ge=0, le=100, description="Combined behavioral score (0-100).")
+    total_duration_months: int
+    avg_tenure_months: float
+    job_hopping_penalty_applied: bool
+    demotions_detected: int
+    summary: str
+
+
 class EvaluationResult(BaseModel):
     """Complete evaluation result for all candidates."""
     evaluations: List[RelevanceEvaluation] = Field(

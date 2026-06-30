@@ -69,14 +69,14 @@ def test_fastembed_workflow():
     # Initialize evaluator with FastEmbed
     print("\n[3] Initializing FastEmbed Embedding Service...")
     
-    evaluator = RelevanceEvaluator(use_fastembed=True)
+    evaluator = RelevanceEvaluator()
     embedding_service = get_embedding_service()
     print(f"[PASS] FastEmbed initialized")
     
     # Extract JD keywords
     print("\n[4] Extracting JD Keywords...")
     
-    jd_keywords = evaluator.extract_jd_required_skills(jd)
+    jd_keywords = evaluator.extract_jd_requirements(jd)
     print(f"[PASS] Extracted {len(jd_keywords)} keywords from JD:")
     for i, keyword in enumerate(jd_keywords[:10], 1):
         print(f"   {i:2d}. {keyword}")

@@ -9,12 +9,15 @@ Key responsibilities:
 - Aggregate into a combined relevance score (0.0-1.0)
 """
 
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import os
 import re
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 from difflib import SequenceMatcher
+
+logger = logging.getLogger(__name__)
 
 from app.models.candidate import Candidate
 from app.models.jd import JobDescription
@@ -150,19 +153,18 @@ class RelevanceEvaluator:
         """Generate embedding for job description using FastEmbed."""
         return self.embedding_service.embed_text(jd.raw_text)
 
-    def generate_candidate_embedding(self, candidate: Candidate) -> np.ndarray:
-        """Generate embedding for candidate profile using FastEmbed."""
-        # Concatenate all relevant fields without truncation
+    def build_candidate_profile_text(self, candidate: Candidate) -> str:
+        """Construct concatenated profile string for a candidate."""
         profile_text = f"{candidate.profile.headline} {candidate.profile.summary}"
-
-        # Add full career history
         for job in candidate.career_history:
             profile_text += f" {job.title} {job.description} {job.company}"
-
-        # Add all skills
         skills_text = " ".join([s.name for s in candidate.skills])
         profile_text += f" Skills: {skills_text}"
-        
+        return profile_text
+
+    def generate_candidate_embedding(self, candidate: Candidate) -> np.ndarray:
+        """Generate embedding for candidate profile using FastEmbed."""
+        profile_text = self.build_candidate_profile_text(candidate)
         return self.embedding_service.embed_text(profile_text)
 
     def compute_vector_similarity(
@@ -313,12 +315,13 @@ class RelevanceEvaluator:
         else:
             return 0.0, f"[INFO] Non-technical title: '{candidate_current_title}'"
 
-    def calculate_rule_based_score(self, jd: JobDescription, candidate: Candidate) -> int:
+    def calculate_rule_based_score(self, jd: JobDescription, candidate: Candidate, requirements: Optional[Dict[str, Any]] = None) -> int:
         """
         Calculate rule-based skill and experience match score (0-100).
         """
-        # Dynamically extract requirements for this specific JD
-        requirements = self.extract_jd_requirements(jd)
+        # Dynamically extract requirements for this specific JD if not pre-provided
+        if requirements is None:
+            requirements = self.extract_jd_requirements(jd)
         
         score = EXPERIENCE_BASE_SCORE
         factors = []
@@ -418,16 +421,14 @@ class RelevanceEvaluator:
         return int(np.clip(score, 0, 100))
 
     def evaluate_candidate(
-        self, jd: JobDescription, candidate: Candidate
+        self, jd: JobDescription, candidate: Candidate, requirements: Optional[Dict[str, Any]] = None, vector_sim: Optional[VectorSimilarityResult] = None
     ) -> RelevanceEvaluation:
         """Evaluate a single candidate against the JD."""
-        # Get vector similarity
-        vector_sim = self.compute_vector_similarity(jd, candidate)
+        if vector_sim is None:
+            vector_sim = self.compute_vector_similarity(jd, candidate)
 
-        # Get rule-based score
-        rule_based_score = self.calculate_rule_based_score(jd, candidate)
+        rule_based_score = self.calculate_rule_based_score(jd, candidate, requirements=requirements)
 
-        # Combine scores
         rule_normalized = rule_based_score / 100.0
         combined_score = VECTOR_SIMILARITY_WEIGHT * vector_sim.cosine_similarity + RULE_BASED_WEIGHT * rule_normalized
 
@@ -474,17 +475,44 @@ class RelevanceEvaluator:
     def evaluate_all_candidates(
         self, jd: JobDescription, candidates: List[Candidate]
     ) -> EvaluationResult:
-        """Evaluate all candidates against the JD."""
-        evaluations = []
-        for candidate in candidates:
-            eval_result = self.evaluate_candidate(jd, candidate)
-            evaluations.append(eval_result)
+        """Evaluate all candidates against the JD with high-performance batching and vectorization."""
+        logger.info(f"Starting relevance evaluation for {len(candidates)} candidates.")
+        requirements = self.extract_jd_requirements(jd)
+        jd_embedding = self.generate_jd_embedding(jd)
+        jd_norm = np.linalg.norm(jd_embedding)
 
-        # Sort by combined_score descending
+        logger.info("Building profile texts and running FastEmbed batch embedding...")
+        profile_texts = [self.build_candidate_profile_text(c) for c in candidates]
+        candidate_embeddings = self.embedding_service.embed_texts(profile_texts)
+
+        logger.info("Computing matrix cosine similarities...")
+        cand_matrix = np.array(candidate_embeddings, dtype=np.float32)
+        cand_norms = np.linalg.norm(cand_matrix, axis=1)
+        
+        valid_mask = (cand_norms > 0) & (jd_norm > 0)
+        similarities = np.zeros(len(candidates), dtype=np.float32)
+        if jd_norm > 0:
+            similarities[valid_mask] = np.dot(cand_matrix[valid_mask], jd_embedding) / (cand_norms[valid_mask] * jd_norm)
+        similarities = np.clip(similarities, 0.0, 1.0)
+
+        logger.info("Calculating rule-based scores in parallel...")
+        evaluations = [None] * len(candidates)
+
+        def _score_candidate(idx: int, candidate: Candidate) -> tuple:
+            sim_val = float(similarities[idx])
+            vector_sim = VectorSimilarityResult(cosine_similarity=sim_val)
+            return idx, self.evaluate_candidate(
+                jd, candidate, requirements=requirements, vector_sim=vector_sim
+            )
+
+        with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
+            futures = {executor.submit(_score_candidate, i, c): i for i, c in enumerate(candidates)}
+            for future in as_completed(futures):
+                idx, result = future.result()
+                evaluations[idx] = result
+
         evaluations.sort(key=lambda x: x.combined_score, reverse=True)
 
-        # Dynamic JD Summary
-        requirements = self.extract_jd_requirements(jd)
         title_str = " ".join(requirements["title_keywords"]).title()
         jd_summary = f"""
 Job Role: {title_str}
@@ -493,6 +521,7 @@ Must-have: {", ".join(requirements['must_have'][:5])}
 Nice-to-have: {", ".join(requirements['nice_to_have'][:5])}
         """.strip()
 
+        logger.info("Relevance evaluation batch completed successfully.")
         return EvaluationResult(
             evaluations=evaluations,
             jd_summary=jd_summary,

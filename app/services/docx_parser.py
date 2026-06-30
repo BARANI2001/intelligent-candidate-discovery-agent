@@ -4,16 +4,17 @@ from fastapi import HTTPException
 
 from app.models.jd import JobDescription
 
-def extract_jd_text(file_bytes: bytes) -> JobDescription:
+def extract_jd_text(file_bytes: bytes, filename: str = "document.docx") -> JobDescription:
     """
     Takes the raw bytes of an uploaded .docx file and returns the 
     extracted text wrapped in a JobDescription model.
-    
-    Raises an HTTPException (which FastAPI turns into a proper error response) 
-    if the file isn't a valid .docx -- e.g. someone uploaded 
-    a .txt file renamed to .docx, or the upload got corrupted.
     """
-    
+    if not filename.lower().endswith(".docx"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only .docx files are supported."
+        )
+
     try:
         doc = Document(io.BytesIO(file_bytes))
     except Exception as exception:
