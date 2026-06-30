@@ -13,7 +13,7 @@ from app.routers import evaluate
 
 app = FastAPI(
     title="Intelligent Candidate Discovery Agent",
-    description="Evaluates and ranks candidates against a Job Description using LLMs and vector similarity.",
+    description="Evaluates and ranks candidates against a Job Description using vector similarity.",
     version="0.1.0",
 )
 
