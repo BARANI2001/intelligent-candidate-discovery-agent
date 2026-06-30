@@ -71,12 +71,12 @@ async def helper_extract_jd(jd_file: UploadFile) -> JobDescription:
         )
     
     jd_bytes = await jd_file.read()
-    # max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    # if len(jd_bytes) > max_bytes:
-    #     raise HTTPException(
-    #         status_code=400,
-    #         detail=f"JD file exceeds the {settings.max_upload_size_mb}MB limit."
-    #     )
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    if len(jd_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"JD file exceeds the {settings.max_upload_size_mb}MB limit."
+        )
     
     service = get_dynamic_evaluation_service()
     try:

@@ -13,7 +13,7 @@ from fastembed import TextEmbedding
 # FastEmbed model configuration
 # bge-small-en-v1.5: 384-dim, ~130MB — fast download, low RAM, 5x faster inference
 # bge-large-en-v1.5: 1024-dim, ~1.34GB — high quality but slow and OOM-prone on CPU
-DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_MODEL = "BAAI/bge-large-en-v1.5"
 EMBEDDING_DIMENSION = 384
 
 
