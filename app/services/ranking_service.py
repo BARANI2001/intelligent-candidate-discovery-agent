@@ -15,12 +15,16 @@ logger = logging.getLogger(__name__)
 from app.models.candidate import Candidate
 from app.models.evaluation import RelevanceEvaluation, BehavioralEvaluation
 from app.models.ranking import RankedCandidate, RankingResponse
+from app.services.honeypot_detector import HoneypotDetector
 
 
 class ConsolidationService:
     """
     Consolidates scores from Step 3 (Relevance) and Step 4 (Behavioral) with Redrob platform signals.
+    Honeypot candidates (impossible profiles) are detected and hard-floored to score ≤ 5.0.
     """
+
+    _honeypot_detector = HoneypotDetector()
 
     AI_CORE_KEYWORDS = {
         "ai", "ml", "machine learning", "deep learning", "nlp", "natural language processing",
@@ -143,12 +147,36 @@ class ConsolidationService:
             final_score = (base_score * avail_mult * eng_mult) + quality_boost + flight_risk_penalty
             final_score = float(np.clip(final_score, 0.0, 100.0))
 
-            # Count AI Core Skills and format exact benchmark reasoning string
+            # E. Honeypot Detection — hard floor to ≤ 5.0 for confirmed honeypots
+            honeypot = self._honeypot_detector.detect(cand)
+            if honeypot.is_honeypot:
+                final_score = min(final_score, 5.0)
+                multipliers["honeypot_penalty"] = True
+                justification_parts.append(
+                    f"HONEYPOT DETECTED (score={honeypot.honeypot_score:.2f}): "
+                    + " | ".join(honeypot.flags)
+                )
+            elif honeypot.honeypot_score >= 0.25:
+                # Suspicious — soft penalty only
+                soft_penalty = honeypot.honeypot_score * 10.0
+                final_score = max(0.0, final_score - soft_penalty)
+                multipliers["honeypot_suspicion_penalty"] = round(-soft_penalty, 2)
+                justification_parts.append(
+                    f"Suspicious profile penalty -{soft_penalty:.1f} pts: "
+                    + " | ".join(honeypot.flags)
+                )
+            final_score = float(np.clip(final_score, 0.0, 100.0))
+
+            # Build submission-quality reasoning (1-2 sentences, spec-compliant)
+            reasoning = self._build_reasoning(
+                cand, rel, beh, honeypot, rel_score, beh_score, final_score, jd_summary
+            )
+
+            # Keep a compact internal justification for API debug use
             ai_skills_count = self.count_ai_core_skills(cand)
             title = cand.profile.current_title or "Professional"
             yrs = cand.profile.years_of_experience
             resp_rate = signals.recruiter_response_rate
-
             benchmark_reasoning = f"{title} with {yrs:.1f} yrs; {ai_skills_count} AI core skills; response rate {resp_rate:.2f}."
 
             ranked_list.append(
@@ -161,6 +189,7 @@ class ConsolidationService:
                     behavioral_score=round(beh_score, 2),
                     applied_multipliers=multipliers,
                     justification=benchmark_reasoning,
+                    reasoning=reasoning,
                     relevance_justification=f"Vector Sim: {rel.vector_similarity.cosine_similarity:.2f}, Rule Score: {rel.rule_based_score}/100" if rel else None,
                     behavioral_summary="; ".join(justification_parts) + f". (Behavioral: {beh.summary})" if beh else "; ".join(justification_parts) + "."
                 )
@@ -181,3 +210,108 @@ class ConsolidationService:
             total_candidates=len(ranked_list),
             results=ranked_list
         )
+
+    # ------------------------------------------------------------------ #
+    #  Submission Reasoning Builder                                        #
+    # ------------------------------------------------------------------ #
+
+    def _build_reasoning(
+        self,
+        cand,
+        rel,
+        beh,
+        honeypot,
+        rel_score: float,
+        beh_score: float,
+        final_score: float,
+        jd_summary: str,
+    ) -> str:
+        """
+        Build a concise 1-2 sentence reasoning string for the submission CSV.
+
+        Rules (from spec Stage 4 manual review):
+          - References specific facts: title, years, company, named skills
+          - Connects to JD requirements
+          - Honestly acknowledges concerns where applicable
+          - No hallucination: only uses data actually in the profile
+          - Tone matches rank (top candidates = positive; bottom = honest limitations)
+        """
+        p = cand.profile
+        signals = cand.redrob_signals
+
+        # === Part 1: Core identity + skill match ===
+        title = p.current_title or "Candidate"
+        yrs = p.years_of_experience
+        company = p.current_company or ""
+        company_str = f" at {company}" if company else ""
+
+        # Top 3 skills by proficiency weight (expert > advanced > intermediate > beginner)
+        proficiency_rank = {"expert": 4, "advanced": 3, "intermediate": 2, "beginner": 1}
+        top_skills = sorted(
+            cand.skills,
+            key=lambda s: (proficiency_rank.get(s.proficiency, 0), s.endorsements),
+            reverse=True
+        )[:3]
+        skills_str = ", ".join(s.name for s in top_skills) if top_skills else "general skills"
+
+        # Rule-based score label
+        if rel_score >= 75:
+            match_label = f"strong JD skill match ({rel_score:.0f}/100)"
+        elif rel_score >= 50:
+            match_label = f"moderate JD skill match ({rel_score:.0f}/100)"
+        else:
+            match_label = f"limited JD skill match ({rel_score:.0f}/100)"
+
+        sentence1 = (
+            f"{title} with {yrs:.1f} yrs{company_str}; "
+            f"top skills: {skills_str}; {match_label}."
+        )
+
+        # === Part 2: Signals + concerns ===
+        concerns = []
+        positives = []
+
+        # Engagement
+        if signals.recruiter_response_rate >= 0.8:
+            positives.append(f"high recruiter response rate ({signals.recruiter_response_rate:.0%})")
+        elif signals.recruiter_response_rate < 0.3:
+            concerns.append(f"low response rate ({signals.recruiter_response_rate:.0%})")
+
+        # Availability
+        if not signals.open_to_work_flag:
+            concerns.append("not currently open to work")
+
+        # Notice period
+        notice = signals.notice_period_days
+        if notice > 90:
+            concerns.append(f"long notice period ({notice}d)")
+        elif notice <= 15:
+            positives.append(f"immediate availability ({notice}d notice)")
+
+        # GitHub
+        if signals.github_activity_score >= 70:
+            positives.append(f"strong GitHub activity ({signals.github_activity_score:.0f}/100)")
+
+        # Behavioral trajectory
+        if beh and beh.demotions_detected > 0:
+            concerns.append(f"{beh.demotions_detected} career demotion(s) detected")
+
+        # Honeypot flag
+        if honeypot.is_honeypot:
+            concerns.append("profile has impossible consistency (honeypot flagged)")
+
+        # Compose sentence 2
+        if positives and not concerns:
+            sentence2 = "Positives: " + "; ".join(positives) + "."
+        elif concerns and not positives:
+            sentence2 = "Concerns: " + "; ".join(concerns) + "."
+        elif positives and concerns:
+            sentence2 = (
+                "Positives: " + "; ".join(positives) +
+                ". Concerns: " + "; ".join(concerns) + "."
+            )
+        else:
+            # Neutral — use behavioral score
+            sentence2 = f"Behavioral trajectory score: {beh_score:.0f}/100."
+
+        return f"{sentence1} {sentence2}"
