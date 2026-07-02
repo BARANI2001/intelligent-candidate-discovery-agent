@@ -22,6 +22,7 @@ from app.services.dynamic_evaluation_service import get_dynamic_evaluation_servi
 from app.services.behavioral_evaluator import BehavioralEvaluator
 from app.services.ranking_service import ConsolidationService
 from app.services.relevance_evaluator import RelevanceEvaluator
+from app.services.embedding_service import get_default_jd
 
 router = APIRouter()
 evaluator = RelevanceEvaluator()
@@ -90,6 +91,14 @@ def helper_parse_candidates(candidates_json: str) -> List[Candidate]:
     Parse and validate candidates input string (JSON array or JSONL)
     using DynamicEvaluationService schema validation.
     """
+    import time
+    start_time = time.perf_counter()
+    stripped = candidates_json.strip()
+    input_length = len(candidates_json)
+    
+    if stripped.startswith('{') and stripped.endswith('}'):
+        raise HTTPException(status_code=400, detail="Candidates must be a JSON array")
+
     service = get_dynamic_evaluation_service()
     try:
         candidates = service.parse_candidates(candidates_json)
@@ -98,19 +107,25 @@ def helper_parse_candidates(candidates_json: str) -> List[Candidate]:
                 status_code=400,
                 detail="The candidates array is empty. Please provide at least one candidate."
             )
+        elapsed_time = time.perf_counter() - start_time
+        logger.info(f"Successfully parsed and validated {len(candidates)} candidates in {elapsed_time:.4f} seconds (payload size: {input_length} chars).")
         return candidates
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        elapsed_time = time.perf_counter() - start_time
+        msg = str(e)
+        logger.warning(f"Failed parsing candidates after {elapsed_time:.4f} seconds. Error: {msg}")
+        if "Invalid JSON" in msg or "JSON array" in msg or "is empty" in msg or "not a JSON object" in msg:
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=422, detail=msg)
 
 @router.post("/evaluate-candidates", response_model=PreprocessedInput)
 async def evaluate_candidates(
-    jd_file: UploadFile = File(..., description="The Job Description as a .docx file"),
     candidates_json: str = Form(..., description="JSON array of candidates matching the Candidate schema")
 ):
     """
     Endpoint to process a Job Description (JD) and a list of candidates.
     """
-    job_description = await helper_extract_jd(jd_file)
+    job_description = get_default_jd()
     candidates = helper_parse_candidates(candidates_json)
     
     return PreprocessedInput(
@@ -121,13 +136,12 @@ async def evaluate_candidates(
 
 @router.post("/evaluate-relevance", response_model=EvaluationResult)
 async def evaluate_relevance(
-    jd_file: UploadFile = File(..., description="The Job Description as a .docx file"),
     candidates_json: str = Form(..., description="JSON array of candidates matching the Candidate schema")
 ):
     """
     Comprehensive relevance evaluation combining vector similarity and rule-based analysis.
     """
-    job_description = await helper_extract_jd(jd_file)
+    job_description = get_default_jd()
     candidates = helper_parse_candidates(candidates_json)
     
     evaluation_result = evaluator.evaluate_all_candidates(job_description, candidates)
@@ -136,8 +150,6 @@ async def evaluate_relevance(
 
 @router.post("/evaluate-dynamic", response_model=EvaluationResult)
 async def evaluate_dynamic(
-    jd_text: Optional[str] = Form(None, description="Job description as plain text"),
-    jd_file: Optional[UploadFile] = File(None, description="Job description as .docx file"),
     candidates_json: Optional[str] = Form(None, description="Candidates as JSON array"),
     candidates_jsonl: Optional[str] = Form(None, description="Candidates as JSONL (one per line)"),
     format_hint: Optional[str] = Form(None, description="Format hint: 'json_array' or 'jsonl'")
@@ -146,14 +158,8 @@ async def evaluate_dynamic(
     Dynamic evaluation endpoint supporting multiple input formats.
     """
     service = get_dynamic_evaluation_service()
-
-    if jd_file:
-        job_description = await helper_extract_jd(jd_file)
-        jd_input = job_description.raw_text
-    elif jd_text:
-        jd_input = jd_text
-    else:
-        raise HTTPException(status_code=400, detail="Provide either jd_text or jd_file")
+    job_description = get_default_jd()
+    jd_input = job_description.raw_text
 
     candidates_input = candidates_json or candidates_jsonl
     if not candidates_input:
@@ -187,21 +193,12 @@ async def validate_candidates(
 
 
 @router.post("/jd-analysis")
-async def analyze_jd(
-    jd_text: Optional[str] = Form(None, description="JD as plain text"),
-    jd_file: Optional[UploadFile] = File(None, description="JD as .docx file")
-):
+async def analyze_jd():
     """
     Analyze JD and extract keywords without evaluating candidates.
     """
     service = get_dynamic_evaluation_service()
-
-    if jd_file:
-        jd = await helper_extract_jd(jd_file)
-    elif jd_text:
-        jd = service.process_jd(jd_text)
-    else:
-        raise HTTPException(status_code=400, detail="Provide either jd_text or jd_file")
+    jd = get_default_jd()
 
     try:
         summary = service.get_jd_summary(jd)
@@ -254,14 +251,13 @@ async def run_ranking_background_task(job_id: str, job_description: JobDescripti
 
 @router.post("/rank-candidates", response_model=JobStatusResponse)
 async def rank_candidates(
-    jd_file: UploadFile = File(..., description="The Job Description as a .docx file"),
     candidates_json: str = Form(..., description="JSON array of candidates matching the Candidate schema")
 ):
     """
     End-to-End Candidate Ranking Pipeline (Async Background Execution).
     Returns a job tracking object immediately. Poll GET /ranking-status/{job_id} every 5 seconds.
     """
-    job_description = await helper_extract_jd(jd_file)
+    job_description = get_default_jd()
     candidates = helper_parse_candidates(candidates_json)
 
     job_id = str(uuid.uuid4())
@@ -297,13 +293,11 @@ async def get_ranking_status(job_id: str):
 
 
 @router.post("/jobs/init", response_model=JobInitResponse)
-async def init_parent_job(
-    jd_file: UploadFile = File(..., description="The Job Description as a .docx file")
-):
+async def init_parent_job():
     """
     Initialize a parent job with a Job Description. Pre-computes and caches requirements.
     """
-    job_description = await helper_extract_jd(jd_file)
+    job_description = get_default_jd()
     
     # Pre-extract requirements and embedding
     requirements = evaluator.extract_jd_requirements(job_description)
