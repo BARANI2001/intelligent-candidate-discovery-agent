@@ -52,3 +52,27 @@ make ui
 ```bash
 python inputs/datasets/validate_submission.py your_submission.csv
 ```
+
+---
+
+## Docker Deployment (Docker Hub)
+
+Run the containerized application directly from Docker Hub without building locally:
+
+```bash
+# Pull the latest image
+docker pull lokeshh29/candidate-agent:latest
+
+# Run the API server
+docker run -p 8000:8000 lokeshh29/candidate-agent:latest
+```
+
+Open your browser at `http://localhost:8000` or interactive API docs at `http://localhost:8000/docs`.
+
+---
+
+## Pipeline & Runtime Architecture
+
+For detailed documentation on offline embedding pre-computation vs. sub-5-minute ranking execution guarantees, please refer to [`SUBMISSION_DOCUMENTATION.md`](SUBMISSION_DOCUMENTATION.md).
+
+
