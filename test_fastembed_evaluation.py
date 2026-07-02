@@ -73,10 +73,8 @@ def test_fastembed_workflow():
     embedding_service = get_embedding_service()
     print(f"[PASS] FastEmbed initialized")
     
-    # Extract JD keywords
-    print("\n[4] Extracting JD Keywords...")
-    
-    jd_keywords = evaluator.extract_jd_requirements(jd)
+    requirements = evaluator.extract_jd_requirements(jd)
+    jd_keywords = requirements["must_have"] + requirements["nice_to_have"] + requirements["title_keywords"]
     print(f"[PASS] Extracted {len(jd_keywords)} keywords from JD:")
     for i, keyword in enumerate(jd_keywords[:10], 1):
         print(f"   {i:2d}. {keyword}")

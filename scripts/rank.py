@@ -14,29 +14,13 @@ Arguments:
 
 Output CSV columns (per submission spec):
     candidate_id, rank, score, reasoning
-
-Chunked Parallel Processing
----------------------------
-When the number of candidates exceeds CHUNK_THRESHOLD, the pipeline automatically
-splits the candidate list into chunks of CHUNK_SIZE and evaluates them concurrently
-across MAX_CONCURRENT_CHUNKS worker threads. All chunk results are then merged and
-passed through a single consolidation + ranking pass.
-
-Performance targets:
-    - CHUNK_SIZE            : 100 candidates per chunk (threshold for parallel dispatch)
-    - MAX_CONCURRENT_CHUNKS : min(32, cpu_count * 4) — balances CPU saturation with
-                              GIL-release windows from FastEmbed (ONNX) and numpy.
-    - Goal                  : 100 K candidates evaluated in < 5 minutes.
 """
 
 import argparse
 import csv
-import os
 import sys
 import logging
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List
 
 # Ensure the project root (parent of this script's directory) is on sys.path
 # so that `app.*` imports resolve correctly when running the script directly.
@@ -50,30 +34,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Chunked parallel processing configuration
-# ---------------------------------------------------------------------------
-# Number of candidates per evaluation chunk.  Keep at 100 so each chunk is
-# small enough to be scheduled quickly while still amortising the FastEmbed
-# batch-embedding overhead.
-CHUNK_SIZE: int = 100
-
-# Minimum total candidates before chunking kicks in.  Below this threshold the
-# original single-batch path is used (avoids unnecessary thread overhead).
-CHUNK_THRESHOLD: int = 100
-
-# Maximum number of chunks that are evaluated concurrently.  FastEmbed's ONNX
-# runtime releases the Python GIL during inference, so threads DO achieve real
-# parallelism for the embedding step.  The rule-based + behavioral work is
-# fast numpy / pure-Python.  Empirically, cpu_count * 4 saturates throughput
-# without thrashing — capped at 32 to avoid excessive memory pressure when
-# loading many embeddings simultaneously.
-MAX_CONCURRENT_CHUNKS: int = min(32, (os.cpu_count() or 4) * 4)
-
-# Maximum number of ranked candidates to write to the output CSV.
-# Submission spec requires exactly 100 rows (1 header + top-100 candidates).
-TOP_N_RESULTS: int = 100
 
 
 def parse_args():
@@ -156,80 +116,12 @@ def load_candidates(candidates_path: Path):
         sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers for chunked evaluation
-# ---------------------------------------------------------------------------
-
-def _chunk_list(lst: list, chunk_size: int) -> List[list]:
-    """Split *lst* into successive sublists of at most *chunk_size* elements."""
-    return [lst[i : i + chunk_size] for i in range(0, len(lst), chunk_size)]
-
-
-def _evaluate_chunk(chunk_idx: int, jd, chunk: list, evaluator, behavioral_evaluator):
-    """
-    Evaluate a single chunk of candidates.
-
-    Runs relevance evaluation and behavioral evaluation **concurrently** (the
-    same strategy as the original single-batch path) and returns the combined
-    results as a tuple so the caller can merge them later.
-
-    This function is designed to be called from a ThreadPoolExecutor worker.
-    FastEmbed (ONNX runtime) releases the GIL during inference, so multiple
-    threads calling this function simultaneously achieve real parallelism for
-    the embedding step.
-
-    Args:
-        chunk_idx:           Zero-based chunk index (used only for logging).
-        jd:                  Parsed JobDescription object shared across chunks.
-        chunk:               Subset of Candidate objects to evaluate.
-        evaluator:           Shared RelevanceEvaluator instance (thread-safe read).
-        behavioral_evaluator: Shared BehavioralEvaluator instance (thread-safe read).
-
-    Returns:
-        (chunk_idx, relevance_result, behavioral_result)
-    """
-    import asyncio
-
-    logger.info(
-        f"[Chunk {chunk_idx}] Evaluating {len(chunk)} candidates "
-        f"(relevance + behavioral in parallel)..."
-    )
-
-    async def _parallel():
-        rel, beh = await asyncio.gather(
-            asyncio.to_thread(evaluator.evaluate_all_candidates, jd, chunk),
-            asyncio.to_thread(behavioral_evaluator.evaluate_all_candidates, chunk),
-        )
-        return rel, beh
-
-    # Each worker thread gets its own event loop.
-    loop = asyncio.new_event_loop()
-    try:
-        relevance_result, behavioral_result = loop.run_until_complete(_parallel())
-    finally:
-        loop.close()
-
-    logger.info(
-        f"[Chunk {chunk_idx}] Done — "
-        f"relevance: {len(relevance_result.evaluations)}, "
-        f"behavioral: {len(behavioral_result)}"
-    )
-    return chunk_idx, relevance_result, behavioral_result
-
-
 def run_ranking(jd, candidates):
     """
     Run the full ranking pipeline:
       1. Relevance evaluation (vector similarity + rule-based)
       2. Behavioral evaluation (career trajectory heuristics)
       3. Consolidation + ranking (Redrob signals, honeypot detection)
-
-    For small candidate sets (<= CHUNK_THRESHOLD) the evaluation runs as a
-    single batch (original behaviour).  For larger sets the candidates are
-    split into chunks of CHUNK_SIZE and evaluated concurrently across up to
-    MAX_CONCURRENT_CHUNKS worker threads.  All partial results are merged
-    before the single consolidation + ranking step.
-
     Returns a RankingResponse object.
     """
     import asyncio
@@ -244,95 +136,28 @@ def run_ranking(jd, candidates):
     total = len(candidates)
     logger.info(f"Starting ranking pipeline for {total} candidates...")
 
-    # ------------------------------------------------------------------
-    # Decide: single-batch path vs chunked parallel path
-    # ------------------------------------------------------------------
-    if total <= CHUNK_THRESHOLD:
-        # ---- Original single-batch path (small candidate set) --------
-        logger.info(
-            f"Candidate count ({total}) <= CHUNK_THRESHOLD ({CHUNK_THRESHOLD}). "
-            "Running single-batch evaluation (relevance + behavioral in parallel)."
+    # Step 1 + 2: Run relevance and behavioral evaluation concurrently
+    async def _run_parallel():
+        logger.info("Running relevance + behavioral evaluation in parallel...")
+        relevance_result, behavioral_result = await asyncio.gather(
+            asyncio.to_thread(evaluator.evaluate_all_candidates, jd, candidates),
+            asyncio.to_thread(behavioral_evaluator.evaluate_all_candidates, candidates),
         )
+        return relevance_result, behavioral_result
 
-        async def _run_parallel():
-            rel, beh = await asyncio.gather(
-                asyncio.to_thread(evaluator.evaluate_all_candidates, jd, candidates),
-                asyncio.to_thread(behavioral_evaluator.evaluate_all_candidates, candidates),
-            )
-            return rel, beh
+    relevance_result, behavioral_result = asyncio.run(_run_parallel())
+    logger.info(
+        f"Evaluation complete. Relevance: {len(relevance_result.evaluations)} evals, "
+        f"Behavioral: {len(behavioral_result)} evals."
+    )
 
-        relevance_result, behavioral_result = asyncio.run(_run_parallel())
-        all_relevance_evals = relevance_result.evaluations
-        all_behavioral_evals = behavioral_result
-        # Reuse the jd_summary produced by the single batch
-        jd_summary = relevance_result.jd_summary
-
-    else:
-        # ---- Chunked parallel path (large candidate set) -------------
-        chunks = _chunk_list(candidates, CHUNK_SIZE)
-        num_chunks = len(chunks)
-        workers = min(MAX_CONCURRENT_CHUNKS, num_chunks)
-
-        logger.info(
-            f"Candidate count ({total}) > CHUNK_THRESHOLD ({CHUNK_THRESHOLD}). "
-            f"Splitting into {num_chunks} chunk(s) of up to {CHUNK_SIZE} candidates each. "
-            f"Dispatching up to {workers} chunk(s) concurrently "
-            f"(MAX_CONCURRENT_CHUNKS={MAX_CONCURRENT_CHUNKS})."
-        )
-
-        # Collect partial results indexed by chunk_idx so we can merge in order.
-        partial_results = [None] * num_chunks  # (relevance_result, behavioral_result)
-        jd_summary = None  # Will be taken from the first completed chunk.
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_idx = {
-                executor.submit(
-                    _evaluate_chunk,
-                    chunk_idx,
-                    jd,
-                    chunk,
-                    evaluator,
-                    behavioral_evaluator,
-                ): chunk_idx
-                for chunk_idx, chunk in enumerate(chunks)
-            }
-
-            completed = 0
-            for future in as_completed(future_to_idx):
-                chunk_idx, rel_result, beh_result = future.result()
-                partial_results[chunk_idx] = (rel_result, beh_result)
-                completed += 1
-                logger.info(
-                    f"Progress: {completed}/{num_chunks} chunks complete "
-                    f"({completed * CHUNK_SIZE:,} / {total:,} candidates processed)."
-                )
-                # Capture jd_summary from whichever chunk finishes first.
-                if jd_summary is None:
-                    jd_summary = rel_result.jd_summary
-
-        # Merge all partial relevance + behavioral evaluations.
-        logger.info("All chunks complete. Merging partial evaluation results...")
-        all_relevance_evals = []
-        all_behavioral_evals = []
-        for rel_result, beh_result in partial_results:
-            all_relevance_evals.extend(rel_result.evaluations)
-            all_behavioral_evals.extend(beh_result)
-
-        logger.info(
-            f"Merge complete — "
-            f"relevance: {len(all_relevance_evals)} evals, "
-            f"behavioral: {len(all_behavioral_evals)} evals."
-        )
-
-    # ------------------------------------------------------------------
-    # Step 3: Single consolidation + ranking pass (always)
-    # ------------------------------------------------------------------
+    # Step 3: Consolidate and rank
     logger.info("Consolidating and ranking candidates...")
     ranking_response = consolidation_service.consolidate_and_rank(
         candidates=candidates,
-        relevance_evals=all_relevance_evals,
-        behavioral_evals=all_behavioral_evals,
-        jd_summary=jd_summary,
+        relevance_evals=relevance_result.evaluations,
+        behavioral_evals=behavioral_result,
+        jd_summary=relevance_result.jd_summary,
     )
 
     logger.info(
@@ -349,18 +174,11 @@ def write_csv(ranking_response, out_path: Path):
     - rank:      integer 1-N (1 = best match)
     - score:     monotonically non-increasing float (0.2000-0.9920)
     - reasoning: 1-2 sentence justification string
-
-    Only the top TOP_N_RESULTS (100) candidates are written, regardless of
-    how many were evaluated.  This matches the submission spec of exactly
-    1 header row + 100 data rows.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    rows = ranking_response.results[:TOP_N_RESULTS]
-    total_evaluated = ranking_response.total_candidates
-    logger.info(
-        f"Writing top {len(rows)} of {total_evaluated} evaluated candidates to: {out_path}"
-    )
+    rows = ranking_response.results
+    logger.info(f"Writing {len(rows)} rows to: {out_path}")
 
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)

@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import axios from 'axios';
-import { UploadCloud, FileText, Users, Loader2 } from 'lucide-react';
+import { UploadCloud, Users, Loader2 } from 'lucide-react';
 import './App.css';
 
 interface JobDescription {
@@ -47,8 +47,27 @@ interface JobStatusResponse {
   results?: RankingResponse;
 }
 
+function smartParseJSON(text: string): any {
+  try {
+    return JSON.parse(text);
+  } catch (e: any) {
+    if (text.includes("'")) {
+      try {
+        // Safe regex to replace single quotes used as delimiters with double quotes
+        const sanitized = text.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_, p1) => {
+          const escaped = p1.replace(/"/g, '\\"');
+          return `"${escaped}"`;
+        });
+        return JSON.parse(sanitized);
+      } catch (innerError) {
+        // Ignore and throw original error
+      }
+    }
+    throw e;
+  }
+}
+
 function App() {
-  const [jdFile, setJdFile] = useState<File | null>(null);
   const [candidatesFile, setCandidatesFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [pollingStatus, setPollingStatus] = useState<string | null>(null);
@@ -56,15 +75,7 @@ function App() {
   const [result, setResult] = useState<RankingResponse | null>(null);
   const [candidatesMap, setCandidatesMap] = useState<Record<string, Candidate>>({});
 
-  const jdInputRef = useRef<HTMLInputElement>(null);
   const candidatesInputRef = useRef<HTMLInputElement>(null);
-
-  const handleJdFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      setJdFile(e.target.files[0]);
-      setError(null);
-    }
-  };
 
   const handleCandidatesFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -74,8 +85,8 @@ function App() {
   };
 
   const handleSubmit = async () => {
-    if (!jdFile || !candidatesFile) {
-      setError("Please upload both a Job Description (.docx) and Candidates Data (.json or .jsonl).");
+    if (!candidatesFile) {
+      setError("Please upload Candidates Data (.json or .jsonl).");
       return;
     }
 
@@ -88,14 +99,22 @@ function App() {
       const candidatesText = await candidatesFile.text();
       let parsedArray: Candidate[] = [];
       try {
-        parsedArray = JSON.parse(candidatesText);
-      } catch (e) {
+        parsedArray = smartParseJSON(candidatesText);
+      } catch (e: any) {
         // Fallback to JSONL parsing (one JSON object per line)
-        parsedArray = candidatesText
-          .split('\n')
-          .map(line => line.trim())
-          .filter(line => line.length > 0)
-          .map(line => JSON.parse(line));
+        try {
+          parsedArray = candidatesText
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0)
+            .map(line => smartParseJSON(line));
+        } catch (jsonlErr: any) {
+          throw new Error(
+            `Failed to parse candidates file. Please make sure it is a valid JSON array or JSONL file. ` +
+            `Ensure keys and string values are enclosed in double quotes (").\n` +
+            `Error details: ${jsonlErr.message || e.message}`
+          );
+        }
       }
 
       const map: Record<string, Candidate> = {};
@@ -109,8 +128,8 @@ function App() {
       setCandidatesMap(map);
 
       const formData = new FormData();
-      formData.append('jd_file', jdFile);
-      formData.append('candidates_json', candidatesText);
+      // Send a clean, standardized, double-quoted JSON array string to the backend
+      formData.append('candidates_json', JSON.stringify(parsedArray));
 
       const response = await axios.post<JobStatusResponse>('http://localhost:8000/rank-candidates', formData, {
         headers: {
@@ -124,7 +143,7 @@ function App() {
       } else {
         const currentJobId = response.data.job_id;
         setPollingStatus("Evaluating candidates... Polling server every 5 seconds");
-        
+
         const intervalId = setInterval(async () => {
           try {
             const statusRes = await axios.get<JobStatusResponse>(`http://localhost:8000/ranking-status/${currentJobId}`);
@@ -150,9 +169,9 @@ function App() {
         // Handle FastAPI validation errors
         const detail = err.response.data.detail;
         if (Array.isArray(detail)) {
-            setError(`Validation Error: ${detail[0].msg} at ${detail[0].loc?.join('.')}`);
+          setError(`Validation Error: ${detail[0].msg} at ${detail[0].loc?.join('.')}`);
         } else {
-            setError(detail);
+          setError(detail);
         }
       } else {
         setError(err.message || "An unexpected error occurred.");
@@ -165,51 +184,34 @@ function App() {
     <div className="app-container">
       <header className="header">
         <h1>Intelligent Candidate Discovery</h1>
-        <p>Upload a job description and candidate profiles to generate deterministic, rule-based AI rankings.</p>
+        <p>Upload candidate profiles to generate deterministic, rule-based rankings against the default Job Description.</p>
       </header>
 
       {error && <div className="error-message">{error}</div>}
 
       <div className="upload-section">
-        {/* JD Upload Zone */}
-        <div 
-          className={`file-drop-zone ${jdFile ? 'active' : ''}`}
-          onClick={() => jdInputRef.current?.click()}
-        >
-          <FileText className="icon" size={48} />
-          <h3>{jdFile ? jdFile.name : 'Upload Job Description'}</h3>
-          <p>{jdFile ? 'Click to change' : 'Accepts .docx only'}</p>
-          <input 
-            type="file" 
-            ref={jdInputRef} 
-            onChange={handleJdFileChange} 
-            accept=".docx" 
-            className="file-input" 
-          />
-        </div>
-
         {/* Candidates Upload Zone */}
-        <div 
+        <div
           className={`file-drop-zone ${candidatesFile ? 'active' : ''}`}
           onClick={() => candidatesInputRef.current?.click()}
         >
           <Users className="icon" size={48} />
           <h3>{candidatesFile ? candidatesFile.name : 'Upload Candidates'}</h3>
           <p>{candidatesFile ? 'Click to change' : 'Accepts .json or .jsonl'}</p>
-          <input 
-            type="file" 
-            ref={candidatesInputRef} 
-            onChange={handleCandidatesFileChange} 
-            accept=".json,.jsonl" 
-            className="file-input" 
+          <input
+            type="file"
+            ref={candidatesInputRef}
+            onChange={handleCandidatesFileChange}
+            accept=".json,.jsonl"
+            className="file-input"
           />
         </div>
       </div>
 
-      <button 
-        className="btn-submit" 
-        onClick={handleSubmit} 
-        disabled={loading || Boolean(pollingStatus) || !jdFile || !candidatesFile}
+      <button
+        className="btn-submit"
+        onClick={handleSubmit}
+        disabled={loading || Boolean(pollingStatus) || !candidatesFile}
       >
         {loading || pollingStatus ? (
           <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>

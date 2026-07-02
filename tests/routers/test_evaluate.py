@@ -98,18 +98,15 @@ def make_valid_candidate(candidate_id="CAND_0000001"):
     }
 
 
+from app.services.embedding_service import set_default_jd
+from app.models.jd import JobDescription
+
 def post_evaluate(jd_paragraphs, candidates, filename="jd.docx"):
     """Helper: builds the multipart request the endpoint expects."""
-    jd_bytes = make_docx_bytes(jd_paragraphs)
+    raw_text = "\n\n".join(jd_paragraphs)
+    set_default_jd(JobDescription(raw_text=raw_text, paragraph_count=len(jd_paragraphs)))
     return client.post(
         "/evaluate-candidates",
-        files={
-            "jd_file": (
-                filename,
-                jd_bytes,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-        },
         data={"candidates_json": json.dumps(candidates)},
     )
 
@@ -177,32 +174,11 @@ def test_evaluate_candidates_accepts_multiple_candidates():
     assert ids == {"CAND_0000001", "CAND_0000002"}
 
 
-# --- /evaluate-candidates: JD file validation ---
-
-def test_evaluate_candidates_rejects_non_docx_extension():
-    response = post_evaluate(["JD text."], [make_valid_candidate()], filename="jd.txt")
-    assert response.status_code == 400
-    assert "docx" in response.json()["detail"].lower()
-
-
-def test_evaluate_candidates_rejects_empty_jd():
-    response = post_evaluate([], [make_valid_candidate()])
-    assert response.status_code == 400
-
-
 # --- /evaluate-candidates: candidates_json parsing ---
 
 def test_evaluate_candidates_rejects_invalid_json():
-    jd_bytes = make_docx_bytes(["JD text."])
     response = client.post(
         "/evaluate-candidates",
-        files={
-            "jd_file": (
-                "jd.docx",
-                jd_bytes,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-        },
         data={"candidates_json": "not json"},
     )
     assert response.status_code == 400
