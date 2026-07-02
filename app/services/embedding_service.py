@@ -11,8 +11,10 @@ from fastembed import TextEmbedding
 
 
 # FastEmbed model configuration
+# bge-small-en-v1.5: 384-dim, ~130MB — fast download, low RAM, 5x faster inference
+# bge-large-en-v1.5: 1024-dim, ~1.34GB — high quality but slow and OOM-prone on CPU
 DEFAULT_MODEL = "BAAI/bge-large-en-v1.5"
-EMBEDDING_DIMENSION = 1024
+EMBEDDING_DIMENSION = 384
 
 
 class EmbeddingService:
@@ -85,8 +87,8 @@ class EmbeddingService:
             else:
                 cleaned_texts.append("")
         
-        # FastEmbed batch embedding
-        embeddings = list(self.embedding_model.embed(cleaned_texts))
+        # FastEmbed batch embedding — process in internal batches for memory efficiency
+        embeddings = list(self.embedding_model.embed(cleaned_texts, batch_size=256))
         
         # Convert to numpy arrays
         result = []

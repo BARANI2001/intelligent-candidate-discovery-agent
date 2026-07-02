@@ -21,17 +21,40 @@ interface Candidate {
   profile: Profile;
 }
 
-interface EvaluationResponse {
-  job_description: JobDescription;
-  candidates: Candidate[];
+interface RankedCandidate {
+  candidate_id: string;
+  rank: number;
+  final_score: number;
+  base_score: number;
+  relevance_score: number;
+  behavioral_score: number;
+  applied_multipliers: Record<string, any>;
+  justification: string;
+  relevance_justification?: string;
+  behavioral_summary?: string;
+}
+
+interface RankingResponse {
+  job_description_summary: string;
+  total_candidates: number;
+  results: RankedCandidate[];
+}
+
+interface JobStatusResponse {
+  job_id: string;
+  status: string;
+  error?: string;
+  results?: RankingResponse;
 }
 
 function App() {
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [candidatesFile, setCandidatesFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pollingStatus, setPollingStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<EvaluationResponse | null>(null);
+  const [result, setResult] = useState<RankingResponse | null>(null);
+  const [candidatesMap, setCandidatesMap] = useState<Record<string, Candidate>>({});
 
   const jdInputRef = useRef<HTMLInputElement>(null);
   const candidatesInputRef = useRef<HTMLInputElement>(null);
@@ -52,7 +75,7 @@ function App() {
 
   const handleSubmit = async () => {
     if (!jdFile || !candidatesFile) {
-      setError("Please upload both a Job Description (.docx or .pdf) and Candidates Data (.json).");
+      setError("Please upload both a Job Description (.docx) and Candidates Data (.json or .jsonl).");
       return;
     }
 
@@ -61,20 +84,66 @@ function App() {
     setResult(null);
 
     try {
-      // Read the candidates JSON file as text
+      // Read the candidates file as text and parse mapping for UI display
       const candidatesText = await candidatesFile.text();
+      let parsedArray: Candidate[] = [];
+      try {
+        parsedArray = JSON.parse(candidatesText);
+      } catch (e) {
+        // Fallback to JSONL parsing (one JSON object per line)
+        parsedArray = candidatesText
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line.length > 0)
+          .map(line => JSON.parse(line));
+      }
+
+      const map: Record<string, Candidate> = {};
+      if (Array.isArray(parsedArray)) {
+        parsedArray.forEach(c => {
+          if (c && c.candidate_id) {
+            map[c.candidate_id] = c;
+          }
+        });
+      }
+      setCandidatesMap(map);
 
       const formData = new FormData();
       formData.append('jd_file', jdFile);
       formData.append('candidates_json', candidatesText);
 
-      const response = await axios.post<EvaluationResponse>('http://localhost:8000/evaluate-candidates', formData, {
+      const response = await axios.post<JobStatusResponse>('http://localhost:8000/rank-candidates', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
       });
 
-      setResult(response.data);
+      if (response.data.status === 'completed' && response.data.results) {
+        setResult(response.data.results);
+        setLoading(false);
+      } else {
+        const currentJobId = response.data.job_id;
+        setPollingStatus("Evaluating candidates... Polling server every 5 seconds");
+        
+        const intervalId = setInterval(async () => {
+          try {
+            const statusRes = await axios.get<JobStatusResponse>(`http://localhost:8000/ranking-status/${currentJobId}`);
+            if (statusRes.data.status === 'completed' && statusRes.data.results) {
+              clearInterval(intervalId);
+              setResult(statusRes.data.results);
+              setLoading(false);
+              setPollingStatus(null);
+            } else if (statusRes.data.status === 'failed') {
+              clearInterval(intervalId);
+              setError(statusRes.data.error || "Background ranking job failed.");
+              setLoading(false);
+              setPollingStatus(null);
+            }
+          } catch (pollErr: any) {
+            console.error("Polling error:", pollErr);
+          }
+        }, 5000);
+      }
     } catch (err: any) {
       console.error(err);
       if (err.response && err.response.data && err.response.data.detail) {
@@ -88,7 +157,6 @@ function App() {
       } else {
         setError(err.message || "An unexpected error occurred.");
       }
-    } finally {
       setLoading(false);
     }
   };
@@ -97,7 +165,7 @@ function App() {
     <div className="app-container">
       <header className="header">
         <h1>Intelligent Candidate Discovery</h1>
-        <p>Upload a job description and candidate profiles to evaluate.</p>
+        <p>Upload a job description and candidate profiles to generate deterministic, rule-based AI rankings.</p>
       </header>
 
       {error && <div className="error-message">{error}</div>}
@@ -110,12 +178,12 @@ function App() {
         >
           <FileText className="icon" size={48} />
           <h3>{jdFile ? jdFile.name : 'Upload Job Description'}</h3>
-          <p>{jdFile ? 'Click to change' : 'Accepts .docx (or .pdf if supported by backend)'}</p>
+          <p>{jdFile ? 'Click to change' : 'Accepts .docx only'}</p>
           <input 
             type="file" 
             ref={jdInputRef} 
             onChange={handleJdFileChange} 
-            accept=".docx,.pdf" 
+            accept=".docx" 
             className="file-input" 
           />
         </div>
@@ -127,12 +195,12 @@ function App() {
         >
           <Users className="icon" size={48} />
           <h3>{candidatesFile ? candidatesFile.name : 'Upload Candidates'}</h3>
-          <p>{candidatesFile ? 'Click to change' : 'Accepts .json array of candidates'}</p>
+          <p>{candidatesFile ? 'Click to change' : 'Accepts .json or .jsonl'}</p>
           <input 
             type="file" 
             ref={candidatesInputRef} 
             onChange={handleCandidatesFileChange} 
-            accept=".json" 
+            accept=".json,.jsonl" 
             className="file-input" 
           />
         </div>
@@ -141,15 +209,15 @@ function App() {
       <button 
         className="btn-submit" 
         onClick={handleSubmit} 
-        disabled={loading || !jdFile || !candidatesFile}
+        disabled={loading || Boolean(pollingStatus) || !jdFile || !candidatesFile}
       >
-        {loading ? (
+        {loading || pollingStatus ? (
           <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-            <Loader2 className="spinner" size={24} /> Processing...
+            <Loader2 className="spinner" size={24} /> {pollingStatus || "Running Relevance & Behavioral Pipeline..."}
           </span>
         ) : (
           <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-            <UploadCloud size={24} /> Evaluate Candidates
+            <UploadCloud size={24} /> Rank Candidates
           </span>
         )}
       </button>
@@ -157,27 +225,69 @@ function App() {
       {/* Results Display */}
       {result && (
         <div className="results-section">
-          <div className="result-card">
-            <h2>Job Description Text ({result.job_description.paragraph_count} paragraphs)</h2>
+          <div className="result-card jd-summary-card">
+            <h2>Job Description Summary ({result.total_candidates} Candidates Evaluated)</h2>
             <div className="raw-text-box">
-              {result.job_description.raw_text}
+              {result.job_description_summary}
             </div>
           </div>
 
-          <div className="result-card">
-            <h2>Parsed Candidates ({result.candidates.length})</h2>
-            <div className="candidate-list">
-              {result.candidates.map((candidate) => (
-                <div key={candidate.candidate_id} className="candidate-card">
-                  <h3 className="candidate-name">{candidate.profile.anonymized_name}</h3>
-                  <p><strong>{candidate.profile.headline}</strong></p>
-                  <p>{candidate.profile.current_title} at {candidate.profile.current_company}</p>
-                  <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                    {candidate.profile.summary.substring(0, 100)}...
-                  </p>
+          <div className="rankings-header">
+            <h2>Ranked Candidates Leaderboard</h2>
+          </div>
+
+          <div className="ranked-candidate-list">
+            {result.results.map((item) => {
+              const cand = candidatesMap[item.candidate_id];
+              return (
+                <div key={item.candidate_id} className="ranked-card">
+                  <div className="ranked-card-header">
+                    <div className="rank-badge">#{item.rank}</div>
+                    <div className="candidate-info">
+                      <h3 className="candidate-name">
+                        {cand?.profile?.anonymized_name || item.candidate_id}
+                      </h3>
+                      <div style={{ fontSize: '0.9rem', color: '#2563eb', fontWeight: 700, marginBottom: '0.35rem' }}>
+                        Candidate ID: {item.candidate_id}
+                      </div>
+                      <p className="candidate-title">
+                        <strong>{cand?.profile?.headline || 'Candidate Profile'}</strong>
+                        {cand?.profile?.current_title ? ` — ${cand.profile.current_title} at ${cand.profile.current_company}` : ''}
+                      </p>
+                    </div>
+                    <div className="score-badge">
+                      <span className="score-value">{item.final_score.toFixed(1)}</span>
+                      <span className="score-label">Final Score</span>
+                    </div>
+                  </div>
+
+                  <div className="score-breakdown">
+                    <div className="score-pill">Relevance: <strong>{item.relevance_score.toFixed(1)}</strong></div>
+                    <div className="score-pill">Behavioral: <strong>{item.behavioral_score.toFixed(1)}</strong></div>
+                    <div className="score-pill">Base: <strong>{item.base_score.toFixed(1)}</strong></div>
+                  </div>
+
+                  {item.applied_multipliers && Object.keys(item.applied_multipliers).length > 0 && (
+                    <div className="multipliers-section">
+                      <span className="multipliers-label">Signals Applied:</span>
+                      <div className="multipliers-tags">
+                        {Object.entries(item.applied_multipliers).map(([key, val]) => (
+                          <span key={key} className="multiplier-tag">{key}: {String(val)}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="justification-box">
+                    <strong>Deterministic Justification:</strong>
+                    <p>{item.justification}</p>
+                    {item.relevance_justification && (
+                      <p className="sub-justification"><em>Relevance Details:</em> {item.relevance_justification}</p>
+                    )}
+                  </div>
                 </div>
-              ))}
-            </div>
+              );
+            })}
           </div>
         </div>
       )}

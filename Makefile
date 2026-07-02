@@ -7,7 +7,7 @@ install:
 
 # Run the FastAPI server
 backend:
-	uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Run the React client
 ui:

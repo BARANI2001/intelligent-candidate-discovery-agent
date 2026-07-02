@@ -9,10 +9,13 @@ Handles dynamic processing of:
 """
 
 import json
+import logging
 from typing import List, Dict, Any, Union, Optional, BinaryIO
 from io import BytesIO
 
 from pydantic import ValidationError
+
+logger = logging.getLogger(__name__)
 
 from app.models.candidate import Candidate
 from app.models.jd import JobDescription
@@ -37,10 +40,6 @@ class DynamicEvaluationService:
         Initialize evaluation service.
         """
         self.evaluator = RelevanceEvaluator()
-
-    # ========================================================================
-    # JD Processing Methods
-    # ========================================================================
 
     def process_jd_text(self, text: str) -> JobDescription:
         """
@@ -308,26 +307,58 @@ class DynamicEvaluationService:
         jd_input: Union[str, bytes, BinaryIO],
         candidates_input: Union[str, List[Dict], bytes],
         candidates_format_hint: Optional[str] = None,
-        batch_size: int = 10,
+        batch_size: int = 10000,
     ) -> EvaluationResult:
         """
-        Evaluate candidates in batches for memory efficiency.
-        
-        Args:
-            jd_input: Job description
-            candidates_input: Candidates (supports same formats)
-            candidates_format_hint: Optional format hint
-            batch_size: Number of candidates per batch
-        
-        Returns:
-            Combined EvaluationResult (all batches ranked together)
+        Evaluate candidates in batches/chunks for memory efficiency and progress logging.
         """
-        # For now, just call evaluate (can be optimized for very large batches)
-        return self.evaluate(jd_input, candidates_input, candidates_format_hint)
+        # Process JD
+        try:
+            jd = self.process_jd(jd_input)
+        except Exception as e:
+            logger.error(f"JD processing failed in evaluate_batch: {str(e)}")
+            raise ValueError(f"JD processing failed: {str(e)}")
 
-    # ========================================================================
-    # Utility Methods
-    # ========================================================================
+        # Process candidates
+        try:
+            candidates = self.parse_candidates(candidates_input, candidates_format_hint)
+        except Exception as e:
+            logger.error(f"Candidate parsing failed in evaluate_batch: {str(e)}")
+            raise ValueError(f"Candidate parsing failed: {str(e)}")
+
+        if not candidates:
+            raise ValueError("Candidates array is empty")
+
+        total_candidates = len(candidates)
+        logger.info(f"Evaluating {total_candidates} candidates in chunks of size {batch_size}...")
+
+        all_evaluations = []
+        for i in range(0, total_candidates, batch_size):
+            chunk = candidates[i : i + batch_size]
+            chunk_num = (i // batch_size) + 1
+            total_chunks = (total_candidates + batch_size - 1) // batch_size
+            logger.info(f"Processing candidate chunk {chunk_num}/{total_chunks} ({len(chunk)} candidates)...")
+            chunk_result = self.evaluator.evaluate_all_candidates(jd, chunk)
+            all_evaluations.extend(chunk_result.evaluations)
+
+        # Sort combined evaluations by combined_score descending
+        all_evaluations.sort(key=lambda x: x.combined_score, reverse=True)
+
+        # Get summary from JD
+        requirements = self.evaluator.extract_jd_requirements(jd)
+        title_str = " ".join(requirements["title_keywords"]).title()
+        jd_summary = f"""
+Job Role: {title_str}
+Experience: {requirements['experience']['min']}-{requirements['experience']['max']} years
+Must-have: {", ".join(requirements['must_have'][:5])}
+Nice-to-have: {", ".join(requirements['nice_to_have'][:5])}
+        """.strip()
+
+        logger.info("Batch chunked evaluation completed successfully.")
+        return EvaluationResult(
+            evaluations=all_evaluations,
+            jd_summary=jd_summary,
+        )
 
     def get_jd_summary(self, jd: JobDescription) -> Dict[str, Any]:
         """
@@ -339,7 +370,7 @@ class DynamicEvaluationService:
         Returns:
             Summary dictionary with keywords, statistics, etc.
         """
-        keywords = self.evaluator.extract_jd_required_skills(jd)
+        keywords = self.evaluator.extract_jd_requirements(jd)
 
         return {
             'raw_text_length': len(jd.raw_text),
